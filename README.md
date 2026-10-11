@@ -1,0 +1,44 @@
+# Echo Mods Pack
+
+A one-click install of two Echo VR mods for PC (community servers, the final Echo VR build):
+
+- **Bottom HUD** (EchoHudPlus + HUD lines): your speed, last run and 7-second top speed in Echo's own font, wrist-thruster rings that fill as your hands line up, speed rings 1–5, a mute icon and connection bars, a green/red flash when you're stunned (green = your shield was up), and a steady glow at the edges of your view when your hands push lined up at speed. Echo's visor lines and its own speed/mute/connection icons are hidden so they don't overlap.
+- **Echo Arcade**: a gamepad tab on the hand tablet with **RetroArch** (30+ systems), DOOM, Duck Hunt, your movies, YouTube and Balatro (from your own Steam copy). It can show on the big lobby posters, and **FREEZE** holds you still while your Touch controllers play RetroArch.
+
+Everything runs on your own PC. Nothing here is networked and only you see your tablet.
+
+## Install
+
+1. Install **Python 3.10 or newer** from [python.org](https://www.python.org/downloads/). In its installer, tick **"Add python.exe to PATH"**.
+2. Download **EchoModsPack.zip** and unzip it somewhere it can stay, for example `Documents\EchoModsPack`. The arcade runs its apps from this folder, so don't delete it afterwards.
+3. **Close Echo VR**, then double-click **`INSTALL.cmd`**. It finds Echo VR by itself (or asks for the folder), downloads what the arcade needs (RetroArch and its cores: about 350 MB to download, 1.5 GB once unpacked), reads the HUD font from your own game files and installs everything. Takes a few minutes.
+4. Start Echo VR.
+
+Needs **EchoLoader** in the game (the community Echo VR installer sets it up). The HUD lines part also needs **NvrAssetPatches**; without it the installer skips that part and tells you.
+
+To remove everything, close Echo VR and double-click **`UNINSTALL.cmd`**. Echo VR gets its own files back. Running `INSTALL.cmd` again updates or repairs the install.
+
+Only want one of them? `INSTALL.cmd --no-arcade` (HUD only) or `INSTALL.cmd --no-hud` (arcade only).
+
+## Using it
+
+**HUD.** It's at the bottom of your view. Settings (positions, sizes, colours, the glow) are in `bin\win10\plugins\EchoHudPlus\settings.ini` in your Echo VR folder; restart Echo after changing them. Details: [hudplus/README.md](hudplus/README.md).
+
+**Arcade.** Open the hand tablet and press the **gamepad** tab (far left). Tap a tile to play.
+
+- **Your games:** put ROMs you own in `arcade\apps\roms\<system>\` (the folder names are listed in `arcade\apps\roms\README.md`). They show up under RetroArch's **Playlists**.
+- **FREEZE** (top of the launcher): you're held still and your Touch controllers play RetroArch. Left stick = D-pad, right stick = analog, A/B/X/Y = face buttons, grips = L/R, triggers = L2/R2, left stick click = SELECT, right stick click = RetroArch menu, **menu button** = START. **Hold the menu button 1 second** to move again (the game pauses). It also switches off by itself when you change level.
+- **AUTO DOCK** (next to FREEZE) puts the arcade on the big lobby posters near you.
+
+Details: [arcade/README.md](arcade/README.md).
+
+## What's in the zip, and what isn't
+
+The zip has the installers, the source of both mods, and their built plugin files (`hudplus\build\EchoHudPlus.dll`, `arcade\dist\`). **No Echo VR files are included.** The HUD font and the HUD-lines patch are made on your PC from your own install. RetroArch and its cores, LÖVE, mpv, yt-dlp, the DOOM shareware and the [Doom-on-EchoVR](https://github.com/heisthecat31/Doom-on-EchoVR) package tools download from their official sources while installing. No ROMs or commercial games are included: bring your own.
+
+## Credits
+
+- HUD, HUD lines and Echo Arcade by Decay-echo.
+- [heisthecat31/Doom-on-EchoVR](https://github.com/heisthecat31/Doom-on-EchoVR): the tablet research and Echo package tools the arcade builds on (downloaded at install, pinned commit).
+- [MinHook](https://github.com/TsudaKageyu/minhook) (BSD 2-Clause, `LICENSES/MinHook.txt`), built into both plugins.
+- [RetroArch / libretro](https://www.libretro.com), [LÖVE](https://love2d.org), [mpv](https://mpv.io), [yt-dlp](https://github.com/yt-dlp/yt-dlp): downloaded at install, under their own licenses.

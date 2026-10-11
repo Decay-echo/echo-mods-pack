@@ -1,0 +1,12 @@
+# Downloads, third-party apps and anything derived from games you own
+/apps/
+/vendor/
+/build/
+/dist/
+/backups/
+install_state.json
+.venv/
+__pycache__/
+*.pyc
+# Derived from your game data by tools/build_poster_table.py (build.cmd makes it)
+/native/generated/posters.h

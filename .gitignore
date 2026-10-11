@@ -1,0 +1,12 @@
+# Made on each PC by INSTALL.cmd (from that PC's own game files and downloads)
+arcade/.venv/
+arcade/apps/
+arcade/vendor/
+arcade/backups/
+arcade/install_state.json
+arcade/build/
+hudplus/data/
+hud_lines/patch/
+# The pack's zip (a release download, not part of the repo)
+/dist/
+__pycache__/

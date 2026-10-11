@@ -1,0 +1,183 @@
+# Echo Arcade
+
+A new **Arcade** tab (gamepad icon) on Echo VR's hand tablet that runs **Balatro**, **Duck Hunt**, **RetroArch** (30+ systems, full menu, plus DOOM), your **movies** and **YouTube** on the tablet screen, all by touch. It's built for private community servers. Everything runs locally on your PC and nothing is networked: only you see your tablet.
+
+```
+┌──────────── Echo VR hand tablet ────────────┐
+│  ECHO ARCADE                tap a game      │
+│  ┌──────────┐ ┌──────────┐ ┌──────────┐     │
+│  │ BALATRO  │ │DUCK HUNT │ │RETROARCH │     │
+│  │ Steam    │ │ Zapper   │ │ 30+ sys. │     │
+│  └──────────┘ └──────────┘ └──────────┘     │
+│  ┌──────────┐ ┌──────────┐ ┌──────────┐     │
+│  │ DOOM     │ │ MOVIES   │ │ YOUTUBE  │     │
+│  └──────────┘ └──────────┘ └──────────┘     │
+│ [pad] (home) (list) (emblem) (friends) [⚙] │
+└─────────────────────────────────────────────┘
+```
+
+| Tile | What it runs | Controls |
+| --- | --- | --- |
+| Balatro: Steam original | Your own Steam copy, unmodified content, **your Steam saves and achievements** | Tap = click, slide = drag cards |
+| Duck Hunt | *Duck Hunt (World).nes* from `apps\roms\nes` in Nestopia, NES Zapper on port 2 (its remap) | Dock the arcade and shoot the poster; tablet RetroPad for Start/Select |
+| RetroArch | RetroArch 1.22 + cores for 30+ systems (Atari to PS2/GameCube/Dreamcast, arcade, DOS). Your ROMs appear under **Playlists**, already paired with a core | On-screen RetroPad: D-pad or **analog stick**, ABXY, L/R, L2/R2, Start/Select, MENU |
+| DOOM | Shareware DOOM via the prboom core | Same RetroPad |
+| Movies | Your video folders (`apps\movies` and Windows *Videos* by default) in mpv | Tap for controls: ±10/30 s, pause, seek bar, volume, subtitles, audio track |
+| YouTube | The YouTube page open in your browser on the PC, shown on the tablet (its sound stays the browser's). Skippable ads are skipped for you as soon as YouTube offers the Skip button. With yt-dlp in `apps\mpv` (optional): also search and saved links / mixes (`apps\youtube.txt`) played in mpv | Like YouTube on a tablet: tap anything on the page, slide to scroll. Toolbar: BACK, HOME, SEARCH (on-screen keyboard into YouTube's search box), PREV, PLAY/PAUSE, NEXT, CLOSE. Taps and scrolling are posted to the browser window, so the cursor never moves and Echo VR keeps focus |
+
+Tap **≡** (Balatro) or **HOME** (RetroArch) for Resume / Quit to launcher / Dock. The **gear** tab is **Settings**: tablet size (0.5x to 4x, applied live; experimental), saved to `echo_tweaks.ini`. It resizes the tablet's screens (the canvases and their touch areas), not the tablet's 3D body, which stays stock size. The view (FOV) is not on the tablet: set it in `echo_tweaks.ini` (below).
+
+### FREEZE: play RetroArch with your Touch controllers
+
+**FREEZE** (launcher header, next to AUTO DOCK; also in the HOME menu and on RetroArch's left panel) holds you still in Echo VR and hands your Touch controllers to RetroArch. It opens RetroArch if it isn't running, or picks up the one that is: pick a game from **Playlists** with the sticks and buttons, and play. Pair it with AUTO DOCK to play on the big lobby poster.
+
+| Touch | RetroPad |
+| --- | --- |
+| Left stick | D-pad, or the left analog stick when **STICK** is on |
+| Right stick | Right analog stick |
+| A / B / X / Y | B / A / Y / X: by position, like an Xbox pad. `freeze_buttons=labels` in `arcade.ini` makes A = A, B = B and so on |
+| Grips / triggers | L, R / L2, R2 |
+| Left stick click | SELECT |
+| Right stick click | RetroArch's menu (open / close) |
+| ☰ (left menu button) | START on a tap. **Hold it 1 s to unfreeze** |
+
+- **Every button at once.** The controllers are read every frame and everything you hold goes through together (run + jump + shoot). The on-screen pad only ever got one fingertip.
+- **Getting out:** hold ☰ for a second, or tap **FREEZE** again. Echo gets your controllers back as if nothing happened, and a game in progress is **paused**. FREEZE again resumes it.
+- **It ends by itself** when the level changes (lobby to match and back), when RetroArch closes, or if the arcade host stops. The game is paused in the first two cases.
+- **How:** the plugin hooks `ovr_GetInputState`. While FREEZE is on, Echo VR sees neutral controllers (no buttons, triggers, grips or sticks), and the real ones go to the host. Hand tracking and finger poses are untouched, so you can still poke the tablet. The local player's velocity is set to zero after each frame's movement update, so you don't drift. The host plays the controllers on RetroArch's Network RetroPad (right stick included) and uses `GET_STATUS` / `PAUSE_TOGGLE` on its command port to pause and resume.
+- **DiscButton** (the Personal Disc mod's summon button, X) steps aside while FREEZE is on: X plays RetroArch and doesn't summon the disc. They coordinate through the event `Local\EchoArcade.ControllerMode`.
+- `patch_retroarch.py` also makes RetroArch read **every** RetroPad packet each frame (stock 1.22 reads one), so buttons pressed together land on the same frame and sticks don't lag. `install.py` applies it.
+
+### Dock on a lobby poster
+
+**AUTO DOCK** (top right of the launcher, and in the ≡ / HOME menu; on unless you turn it off, saved in `echo_tweaks.ini` `[dock] auto=`) puts the arcade on the big lobby poster nearest you by itself, and on every other poster of the same kind in that lobby (the game swaps the picture on the model they share). Walk up to another kind of poster and it goes on that one too: the earlier ones keep it. Posters docked this session get it back by themselves when you return to their lobby after a match. All of them take touches and shots. The tablet keeps showing it too, and turning **AUTO DOCK** off gives every poster its own picture back (a server poster comes back as well). Dock works on 30 of the 36 dynamic posters of the social and combat lobbies: the curved ring over the hub, the standing posters and the big combat-lobby ones. The sideways news board is left out. Six of them (a combat-lobby set piece and four in the social lobby) are left out too: their picture face is not mapped, and on the set piece the arcade drew blank and a shot at it crashed the GPU.
+
+- **It's a touch screen.** Poke the poster with a fingertip: tap, hold and slide work as on the tablet (cards drag in Balatro, the on-screen RetroPad works).
+- **Light gun.** Where your own bullets meet the docked poster, it's a tap at that exact spot: shoot the tiles, the menus, Balatro's cards, the player controls or the RetroPad's buttons. Only your shots count, not other players'. On a RetroArch game's picture a shot is a real **light-gun** shot, aimed where it hit (see below).
+- Only you see it: the picture is streamed into your game locally, like the tablet.
+
+### Light-gun games (RetroArch)
+
+Duck Hunt style games work with the in-game guns: dock the arcade, start the game, and shoot the docked poster. Each bullet that lands on the game's picture aims the game's light gun at that spot and pulls the trigger (shots on the side panels still press the RetroPad buttons). Tested with *Metal Combat* (SNES Super Scope, Snes9x): aim calibration, crosshair and shots all land where the bullets hit.
+
+- It goes through RetroArch's standard light gun, on any port, so it should work with every core that uses it: NES Zapper (Nestopia), SNES Super Scope / Justifier (Snes9x), Menacer / Light Phaser (Genesis Plus GX), GunCon / Justifier (PCSX ReARMed) and others. Only Snes9x has been tried so far.
+- The game needs a light gun plugged in. If a game ignores the shots, open RetroArch's **MENU** > *Controls* > *Port 1 (or 2) Controls* > *Device Type*, pick the gun (Zapper, Super Scope, GunCon...) and *Save Game Remap File*. The Super Scope, for example, is Port 2 in Snes9x.
+- Leave a core's own gun option on *Lightgun* (the usual default), not *Touchscreen*/*Pointer*/*Mouse*.
+- **The gun's own buttons** (GunCon A/B, Justifier special, Super Scope pause...): once you have shot at the game, the tablet's **A**, **B**, **X**, **START** and **SELECT** also press the gun's A, B, C, Start and Select. The gun replaces the RetroPad on its port, so the RetroPad alone can't reach them. They are invisible overlay buttons in the bottom-left corner of RetroArch's window, pressed with a 0.3 s touch (Time Crisis misses shorter presses).
+- Tested: *Metal Combat* (SNES Super Scope), *Duck Hunt* (NES Zapper, Nestopia: the Zapper reads light off the screen, and aimed shots hit ducks), *Time Crisis* PAL (PlayStation GunCon, PCSX ReARMed: language screen with tablet A, G-Con calibration, menus and stage 1 by shooting).
+
+**How:** RetroArch aims its light gun at a touch on its window, focused or not, and an invisible overlay (`lightgun_overlay.cfg`, RetroArch's overlay light gun) makes the touch pull the trigger, for every core and port; the same overlay holds the gun-button hitboxes. So the host injects a 0.1 s touch at the spot. The window is marked *no-activate*, so the touch never takes focus from Echo VR. A touch goes to whichever window is on top at that point, so while you shoot, RetroArch's window is brought on screen and kept on top (without focus); 3 s after your last shot it goes back behind your windows (or off screen).
+
+`light_gun=` in `arcade.ini`:
+
+| Value | What a shot does |
+| --- | --- |
+| `touch` (default) | The touch above. Echo VR keeps focus. |
+| `focus` | Fallback: gives RetroArch focus, puts the Windows cursor on the spot and clicks. Focus and the cursor go back 2 s after your last shot (or when the game closes). |
+| `off` | Nothing on the game's picture (no overlay either). |
+
+**Sound** from the apps goes to the VR headset (Link / Air Link "Oculus Virtual Audio Device"), not the Windows default: each app gets its own output device, the same per-app setting as Windows' volume mixer. Change it with `audio_device=` in `arcade.ini` (`default` = Windows default).
+
+The six tab icons are centred on the bar; the Arcade and Settings icons are drawn at build time from your game's own tab art, so they match the stock ones. See **[docs/ROMS.md](docs/ROMS.md)** for ROM folders and BIOS files.
+
+## How it works
+
+```
+echovr.exe
+ ├─ EchoLoader (dbgcore.dll) loads plugins\EchoArcade.dll
+ │    • hooks the tablet UI: new tab, page switching, touch cells (MinHook)
+ │    • D3D12: finds the tab's screen texture (and the poster screen) when the
+ │      engine creates it and copies each new frame into it on the game's own queue
+ │    • DOCK: gives the nearest lobby poster that texture through the game's own
+ │      poster system; fingertips and bullet rays hit-test its curved face
+ └─ starts plugins\EchoArcade\ArcadeHost.exe (dies with Echo via a job object)
+        • draws the launcher and touch controls
+        • captures the game window (Windows.Graphics.Capture) → shared memory
+        • touches → Balatro (Lua bridge over UDP 127.0.0.1)
+                  → RetroArch (network RetroPad + command port, 127.0.0.1;
+                               light gun: injected touch on its window)
+                  → mpv (JSON IPC pipe), Plex (plex.tv link + your server)
+```
+
+- **Tablet data:** `tools/build_arcade_tab.py` reads your game's own manifest and adds the root, navigation and page canvases, the button table (the tab plus a 32×18 grid of invisible poke cells), the 1024×574 BGRA screen texture, the tab icons, and the 1249×612 poster screen texture (held by a hidden sprite so it stays loaded). Stock resources are verified byte-identical.
+- **Posters:** `tools/build_poster_table.py` (run by the tab build, and by `build.cmd` if missing) reads every lobby level's dynamic posters: their placement and the picture face of each poster model, into `native/generated/posters.h`.
+- **Balatro:** `tools/prepare_balatro.py` extracts the game from your `Balatro.exe` (a fused LÖVE executable) into `apps/balatro/`. It never writes to the Steam folder. The game then runs on LÖVE 11.5 with a small touch bridge (`bridge/arcade_bridge.lua`) appended to `main.lua`.
+- **Supported build:** `echovr.exe` with timestamp `1683152886`. The runtime checks the executable and every hooked function's bytes at startup, and disables itself (logging the reason) on any mismatch.
+
+## Install
+
+Requirements:
+
+- Windows 10/11 x64.
+- An Echo VR install with **EchoLoader** (the `dbgcore.dll` + `echoloader.json` setup used by community servers).
+- Visual Studio 2022 with *Desktop development with C++*.
+- Python 3.10+.
+- Balatro on Steam, if you want the Balatro tile. *Duck Hunt (World).nes* in `apps\roms\nes`, for the Duck Hunt tile.
+
+```powershell
+python -m venv .venv
+.venv\Scripts\pip install zstandard==0.25.0 pillow texture2ddecoder
+.venv\Scripts\python tools\setup_apps.py        # LÖVE, mpv + yt-dlp, RetroArch + 30 cores, DOOM shareware
+.venv\Scripts\python tools\prepare_balatro.py   # finds Balatro.exe in your Steam libraries
+.\build.cmd                                      # EchoArcade.dll, ArcadeHost.exe, runs the IPC test
+# close Echo VR, then:
+.venv\Scripts\python tools\install.py install --game "C:\path\to\ready-at-dawn-echo-arena"
+```
+
+Start Echo VR, open the hand tablet and press the **gamepad** tab (far left). The first open starts the host; after that the launcher appears.
+
+To uninstall, close Echo VR and run `tools\install.py restore`. It puts back the original manifest (hash-checked) and `echoloader.json`, and removes the package and plugin files. Backups are kept in `backups\`.
+
+After changing code, run `build.cmd` and then `tools\install.py update`. That refreshes the plugin, host and config without touching the tablet data. When the tablet data itself changes (as it did for DOCK), `update` says so: close Echo VR and run `tools\install.py reinstall` (restore, then install). Re-run `prepare_balatro.py` after Steam updates Balatro.
+
+Put your ROMs in `apps\roms\<system>\` (see [docs/ROMS.md](docs/ROMS.md)); the playlists rebuild every time RetroArch opens. Video folders are set by `movies=` in `plugins\EchoArcade\arcade.ini`.
+
+**Adding a ROM set:** `tools\import_roms.py "<set>.zip" <system>` unpacks a set (including zips nested inside it) into `apps\roms\<system>\`.
+
+**FOV tweak:** `plugins\EchoArcade\echo_tweaks.ini` sets `[fov] x=` / `y=` multipliers (1.0 to 2.0; below 1.0 would cut off the edges of the view), edited only in that file, the same idea as EchoVR-Haptics' FovMultiplier, so you don't need that tool (it replaces EchoLoader; see Troubleshooting). Keep x and y equal (e.g. 1.4) for recordings; stretching one axis looks warped. The install seeds it from an old `haptics_config.txt` if present and never overwrites your edits.
+
+**Plex privacy:** linking stores a Plex token in `%LOCALAPPDATA%\EchoArcade\plex.json`, never in the repo or the logs. *Unlink Plex* at the bottom of the Plex library list removes it. Streams go straight from your server to this PC.
+
+## Test without a headset
+
+`tools/fake_game.py` stands in for Echo VR: it keeps the heartbeat alive, pokes cells, answers DOCK like a lobby would, sends poster touches and shots, and saves the tablet frame as a PNG.
+
+```powershell
+dist\EchoArcade\ArcadeHost.exe --standalone
+.venv\Scripts\python tools\fake_game.py tap 757 423      # DOOM tile
+.venv\Scripts\python tools\fake_game.py tap 876 38       # DOCK TO POSTER
+.venv\Scripts\python tools\fake_game.py poster 170 420   # a fingertip on the docked poster
+.venv\Scripts\python tools\fake_game.py shot 990 300     # a bullet on the docked poster
+.venv\Scripts\python tools\fake_game.py tap 602 38        # FREEZE
+.venv\Scripts\python tools\fake_game.py pad A+RT 1 0 0 0 0.5   # Touch controllers: A + right trigger, stick right
+.venv\Scripts\python tools\fake_game.py pad MENU 0 0 0 0 1.3   # hold the menu button: unfreeze
+.venv\Scripts\python tools\fake_game.py level           # a new level loads (FREEZE ends)
+.venv\Scripts\python tools\fake_game.py snap frame.png
+```
+
+`build.cmd` also runs `freeze_test` (the controller mapping: face buttons, D-pad / stick, the menu button's tap and hold, many buttons at once) and checks the controller hand-off in `ipc_test`.
+
+`build.cmd` also runs `poster_math_test`: for every poster, touches and bullet rays at known points of its face must land on the right screen pixel.
+
+## Troubleshooting
+
+- The logs are `%LOCALAPPDATA%\EchoArcade\runtime.log` (in-game plugin) and `host.log` (launcher and apps).
+- **Arcade tab shows but does nothing, and there's no `runtime.log`:** the plugin never started. Run `tools\install.py status`. If `echoloader dll: False`, another mod (e.g. the EchoVR-Haptics/FOV tool) replaced `bin\win10\dbgcore.dll`. Put EchoLoader back from `https://files.echovr.de/updates/dbgcore.dll` (the Echo VR Installer's source).
+- **Arcade tab missing:** check `runtime.log` for `unsupported echovr.exe` or `signature mismatch`. Another tablet mod (e.g. the DOOM/MUSIC tab) uses the same slot; restore that one first.
+- **Tab opens but shows the "STARTING…" splash forever:** look for `stream:` lines in `runtime.log`. `screen texture created` and `frames uploaded` should both appear.
+- **Balatro only reacts to some taps:** on a profile that hasn't finished Balatro's tutorial, Jimbo's tutorial blocks everything except its own prompts. Tap **Skip >** (top right) or his speech bubble.
+- **DOCK says "No lobby poster here"**: dock works in the social and combat lobbies, not in matches. **"Could not find your hands"**: touch the tablet once (that starts the fingertip tracking) and press DOCK again.
+- **Docked, but the poster keeps its picture or touches/shots miss:** `runtime.log` has `posters:` and `light gun:` lines (where you were, which poster, where each shot went). Send those.
+- **Light-gun shots don't register:** `host.log` has `light gun:` lines (where each shot went on the desktop, and whether another window was on top of RetroArch there). Check the game has a gun plugged in (above), or try `light_gun=focus`.
+- **App windows** sit behind your other windows at the top-left of the desktop. Set `window_mode=offscreen` in `plugins\EchoArcade\arcade.ini` to move them off-screen.
+
+## Status
+
+On the desktop, every tile has been driven end to end through the real host, capture and input paths using `fake_game.py`: launching, touch input, pause menu and clean quit for all four tiles, and DOCK, poster touches and shots through the host. The RetroArch light gun (both modes, desktop and off-screen windows) was driven the same way with *Metal Combat* while another window kept focus. The in-game DOCK (poster texture override, fingertip and bullet hit-testing) is built from the game's code and data but hasn't been tried in a lobby yet. Report `runtime.log` with any issue.
+
+## Credits
+
+- **[heisthecat31/Doom-on-EchoVR](https://github.com/heisthecat31/Doom-on-EchoVR):** the reverse-engineered tablet canvas format, button records, hook addresses and package tools this builds on. `setup_apps.py` fetches it at a pinned commit; it is not redistributed here.
+- **[MinHook](https://github.com/TsudaKageyu/minhook)** (BSD-2), included in `native/vendor/minhook`.
+- **[LÖVE](https://love2d.org), [RetroArch/libretro](https://www.libretro.com), [prboom](https://github.com/libretro/libretro-prboom).**
+- Balatro © LocalThunk / Playstack. You need your own copy; no game files are included.
