@@ -16,7 +16,7 @@ Everything runs on your own PC. Nothing here is networked and only you see your 
 
 Needs **EchoLoader** in the game (the community Echo VR installer sets it up). The HUD lines part also needs **NvrAssetPatches**; without it the installer skips that part and tells you.
 
-To remove everything, close Echo VR and double-click **`UNINSTALL.cmd`**. Echo VR gets its own files back. Running `INSTALL.cmd` again updates or repairs the install.
+To remove everything, close Echo VR and double-click **`UNINSTALL.cmd`**. Echo VR gets its own files back. Running `INSTALL.cmd` again updates or repairs the install. An update keeps your HUD settings; to switch to a new version's HUD layout, run `INSTALL.cmd --reset-hud` (your old settings are kept as `settings.ini.old`).
 
 Only want one of them? `INSTALL.cmd --no-arcade` (HUD only) or `INSTALL.cmd --no-hud` (arcade only).
 

@@ -6,6 +6,7 @@
 Options: --game PATH   your ready-at-dawn-echo-arena folder (found by itself in the usual places)
          --no-arcade   only the HUD
          --no-hud      only Echo Arcade
+         --reset-hud   switch to this version's HUD settings (an earlier install keeps its own otherwise)
 
 Close Echo VR first. Needs Python 3.10+, internet (Python packages, RetroArch and the other
 arcade apps), and EchoLoader in the game (the community Echo VR installer sets it up).
@@ -161,7 +162,8 @@ def install(args):
     elif args.dry_run:
         print('would install', HERE / 'hudplus' / 'build' / 'EchoHudPlus.dll', 'and', HERE / 'hudplus' / 'data' / 'echo_digits.bin')
     else:
-        run([VENV_PY, HERE / 'hudplus' / 'install_hudplus.py', '--target', game], 'Installing the HUD')
+        run([VENV_PY, HERE / 'hudplus' / 'install_hudplus.py', '--target', game, *(['--reset-settings'] if args.reset_hud else [])],
+            'Installing the HUD')
     print(f'\n[6/{total}] HUD lines')
     if not hud_lines:
         print('skipped')
@@ -207,6 +209,7 @@ def main():
     ap.add_argument('--no-arcade', action='store_true', help='leave Echo Arcade out')
     ap.add_argument('--no-hud', action='store_true', help='leave the HUD out')
     ap.add_argument('--dry-run', action='store_true', help='download and prepare everything, but change nothing in the game')
+    ap.add_argument('--reset-hud', action='store_true', help="use this pack's HUD settings (the old ones are kept as settings.ini.old)")
     args = ap.parse_args()
     if sys.version_info < (3, 10):
         stop('Python 3.10 or newer is needed (python.org).')
