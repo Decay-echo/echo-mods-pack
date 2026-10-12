@@ -38,7 +38,7 @@ struct Settings {
     bool icons = true;            // draw the mute / connection icons in the rings
     float pingBars[3] = {50, 100, 150};  // ms: below these, 4 / 3 / 2 bars (else 1)
     bool edgeGlow = true;         // while your hands push lined up, the edges of the view glow in the HUD colour (like shielding)
-    float edgeGlowStrength = 0.3f;  // opacity at the edges, lined up, below edgeGlowFrom (0..1)
+    float edgeGlowStrength = 0.f;   // opacity just above edgeGlowFrom (0 = fades in from nothing); none at or below it
     float edgeGlowPeak = 0.55f;     // opacity at the edges, lined up, from edgeGlowTo up (steady, low enough to see through)
     float edgeGlowFrom = 3.5f, edgeGlowTo = 4.8f;  // m/s: builds over this window, stays at the peak above it
     // Thruster score (cos of half the angle between the hands: 0.9 is about 50 degrees, 0.985 about 20):
@@ -242,10 +242,11 @@ inline float speedPotential(const Settings& s, float speed) {
     return s.edgeGlowTo > s.edgeGlowFrom ? clamp01((speed - s.edgeGlowFrom) / (s.edgeGlowTo - s.edgeGlowFrom)) : 0.f;
 }
 
-// Edge opacity while lined up: steady (no pulsing), edgeGlowStrength below the speed window,
-// rising to edgeGlowPeak across it and staying there above it.
-inline float edgeGlowAlpha(const Settings& s, float k) {
-    return s.edgeGlowStrength + (s.edgeGlowPeak - s.edgeGlowStrength) * clamp01(k);
+// Edge opacity while lined up, from your speed: none at or below edgeGlowFrom, then steady
+// (no pulsing), rising from edgeGlowStrength to edgeGlowPeak at edgeGlowTo and staying there.
+inline float edgeGlowAlpha(const Settings& s, float speed) {
+    if (!(speed > s.edgeGlowFrom)) return 0;
+    return s.edgeGlowStrength + (s.edgeGlowPeak - s.edgeGlowStrength) * speedPotential(s, speed);
 }
 
 // ---- overlay image ------------------------------------------------------------------

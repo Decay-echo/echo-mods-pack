@@ -49,10 +49,10 @@ icons=1
 ; ping (ms) below which 4 / 3 / 2 bars light (otherwise 1)
 ping_bars_ms=50,100,150
 ; while your hands push lined up, the edges of your view glow in your HUD colour, like
-; shielding: steady, screen_glow_strength below screen_glow_from (m/s), building to
-; screen_glow_peak at screen_glow_to and staying there above it
+; shielding: steady, nothing up to screen_glow_from (m/s), then building from
+; screen_glow_strength (0 = fades in from nothing) to screen_glow_peak at screen_glow_to
 screen_glow=1
-screen_glow_strength=0.3
+screen_glow_strength=0
 screen_glow_peak=0.55
 screen_glow_from=3.5
 screen_glow_to=4.8

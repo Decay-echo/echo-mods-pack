@@ -7,7 +7,8 @@
 //    hand (full = the best speed). Your mute icon sits in the left ring and the
 //    connection bars in the right one (Echo's own ones are hidden by hud_lines). While your
 //    hands push lined up, the edges of the view glow in the HUD colour, like shielding:
-//    steady, brighter the better they line up, building from 3.5 m/s to its peak at 4.8.
+//    steady, brighter the better they line up, none up to 3.5 m/s, then building to its
+//    peak at 4.8.
 //  * HUD colour: your team's (Echo's blue or orange), white when not on a team.
 //  * Speed tracker: above the speed, in Echo's own speed font and your HUD colour, the
 //    top speed of your last run at or above 10 m/s, held until the next run replaces it.
@@ -417,11 +418,11 @@ unsigned refresh(Session session, const QuadLayer** out) {
     }
     float edgeDt = ov.edgeAt >= 0 ? float(t - ov.edgeAt) : 0;
     ov.edgeAt = t;
-    float potential = fresh && s.local.speedOk ? speedPotential(settings, s.local.speed) : 0;
+    float glowAlpha = fresh && s.local.speedOk ? edgeGlowAlpha(settings, s.local.speed) : 0;
     // One steady glow around the whole edge: as bright as the hands are lined up, times the speed.
     float aligned = showThrusters && settings.edgeGlow ? alignment(settings, th, score) : 0;
     ov.edgeLevel = edgeGlowStep(ov.edgeLevel, aligned, edgeDt);
-    int edgeStep = int(ov.edgeLevel * edgeGlowAlpha(settings, potential) * 48 + .5f);
+    int edgeStep = int(ov.edgeLevel * glowAlpha * 48 + .5f);
 
     // stun flash, else the edge glow (drawn first so everything else sits on top of it)
     float alpha = settings.stun ? flashAlpha(s.flash, t, settings.flashStrength) : 0;
@@ -604,7 +605,7 @@ void readSettings(const std::wstring& ini) {
     s.swapHands = b(L"thrusters", L"swap_hands", s.swapHands);
     s.icons = b(L"thrusters", L"icons", s.icons);
     s.edgeGlow = b(L"thrusters", L"screen_glow", s.edgeGlow);
-    s.edgeGlowStrength = f(L"thrusters", L"screen_glow_strength", s.edgeGlowStrength, 0.05f, 1.f);
+    s.edgeGlowStrength = f(L"thrusters", L"screen_glow_strength", s.edgeGlowStrength, 0.f, 1.f);
     s.edgeGlowPeak = f(L"thrusters", L"screen_glow_peak", s.edgeGlowPeak, s.edgeGlowStrength, 1.f);
     s.edgeGlowFrom = f(L"thrusters", L"screen_glow_from", s.edgeGlowFrom, 0.f, 30.f);
     s.edgeGlowTo = f(L"thrusters", L"screen_glow_to", s.edgeGlowTo, s.edgeGlowFrom + 0.1f, 40.f);
