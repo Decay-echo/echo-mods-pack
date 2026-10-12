@@ -36,6 +36,7 @@ struct Settings {
     float thrusterY = 43.f;       // centred on the two speeds
     bool swapHands = false;       // default: left gauge = Echo's hand 0
     bool icons = true;            // draw the mute / connection icons in the rings
+    bool rings = true;            // draw the thruster gauge rings around them (off: just the icons)
     float pingBars[3] = {50, 100, 150};  // ms: below these, 4 / 3 / 2 bars (else 1)
     bool edgeGlow = true;         // while your hands push lined up, the edges of the view glow in the HUD colour (like shielding)
     float edgeGlowStrength = 0.f;   // opacity just above edgeGlowFrom (0 = fades in from nothing); none at or below it
@@ -458,10 +459,12 @@ inline void drawBars(Canvas& cv, const Rect& r, int lit, Color c) {
 
 // One thruster cell: the ring, plus the mute icon (left) or connection bars (right).
 // When the ring is full the icon is drawn in a light tint on the filled circle.
-inline void drawThrusterCell(Canvas& cv, const Rect& r, int side, float score, bool active, Color hud, bool icons, bool talking, int bars) {
-    drawMeter(cv, r, score, active, hud);
+inline void drawThrusterCell(Canvas& cv, const Rect& r, int side, float score, bool active, Color hud, bool icons, bool talking, int bars,
+                             bool ring = true) {
+    if (ring) drawMeter(cv, r, score, active, hud);
+    else cv.clear(r);
     if (!icons) return;
-    Color ink = active && score >= kThrustBest ? fillInk(hud) : hud;
+    Color ink = ring && active && score >= kThrustBest ? fillInk(hud) : hud;
     if (side == 0) drawMic(cv, r, talking, ink);
     else drawBars(cv, r, bars, ink);
 }

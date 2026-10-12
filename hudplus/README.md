@@ -1,5 +1,7 @@
 # EchoHudPlus
 
+**As installed:** your current speed, centred and a little bigger (`current_font_px` 20), the last-run speed under it, the mute icon and connection bars either side, and the two screen effects: the edge glow when your hands push lined up above 3.5 m/s, and the green/red stun flash. The gauges are switched off in `settings.ini` and come back with one setting each: `[thrusters] rings=1` (the gauge rings around the icons), `[speed] ring=1` (the 1-5 speed rings), `top_speed=1` (the 7-second top speed beside the current speed), `[boost] enabled=1`.
+
 Extra readouts at the bottom of your view, where hud_lines moves Echo VR's speed readout (and hides Echo's own speed text, mute icon and connection bars, which this draws instead). Everything is drawn in your HUD colour: Echo's blue or orange for your team (from the network game's player record), white when you're not on a team.
 
 - **Wrist thruster gauges.** One ring either side of the speed, one per hand. Each ring fills with how much of that hand's push goes into one direction together with the other hand. At the best push the whole circle fills in and the icon inside turns dark. One hand alone fills half (it caps at 1 m/s), and hands aimed apart fill less. A faint ring means that hand isn't thrusting.

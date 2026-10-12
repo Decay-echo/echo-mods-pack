@@ -36,15 +36,17 @@ orange=255,132,1
 neutral=235,235,235
 
 [thrusters]
-; one ring per wrist, in your HUD colour: it fills with how much of that hand's push
-; goes into one direction together with the other hand (full = best speed)
+; your mute icon (left) and connection bars (right), either side of the speeds
 enabled=1
+; 1 = a gauge ring around each icon, one per wrist: it fills with how much of that hand's
+; push goes into one direction together with the other hand (full = best speed)
+rings=0
 size_px=38
 x_px=60
 y_px=43
 ; 1 = if the left ring reacts to your right hand
 swap_hands=0
-; your mute icon in the left ring, connection bars in the right one
+; the mute icon and connection bars themselves
 icons=1
 ; ping (ms) below which 4 / 3 / 2 bars light (otherwise 1)
 ping_bars_ms=50,100,150
@@ -69,16 +71,17 @@ enabled=1
 threshold=10
 ; box between the rings: height (twice as wide), and the two digit sizes
 size_px=34
-current_font_px=16
+current_font_px=20
 font_px=13.5
-; beside the current speed: your top speed over the last top_speed_seconds
-top_speed=1
+; 1 = beside the current speed, your top speed over the last top_speed_seconds
+; (off: the current speed sits in the middle on its own)
+top_speed=0
 top_speed_seconds=7
 ; how far below the readout's centre (negative = above it)
 down_px=43
 ; five numbered rings above the speeds, side by side: each fills from the previous
 ; ring's speed to its own (m/s) and lights up when you reach it
-ring=1
+ring=0
 rings_at=1,2,3,4,5
 ring_size_px=14
 ring_gap_px=3
@@ -95,6 +98,7 @@ y_px=40
 swap_sides=0
 
 [stun]
+; a green/red flash when you're stunned (green: your shield was up)
 enabled=1
 ; a shield dropped this long before the stun still counts as up (green)
 shield_grace_ms=200

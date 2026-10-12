@@ -2,7 +2,7 @@
 
 A one-click install of two Echo VR mods for PC (community servers, the final Echo VR build):
 
-- **Bottom HUD** (EchoHudPlus + HUD lines): your speed, last run and 7-second top speed in Echo's own font, wrist-thruster rings that fill as your hands line up, speed rings 1–5, a mute icon and connection bars, a green/red flash when you're stunned (green = your shield was up), and a steady glow at the edges of your view when your hands push lined up at speed. Echo's visor lines and its own speed/mute/connection icons are hidden so they don't overlap.
+- **Bottom HUD** (EchoHudPlus + HUD lines): a clean readout at the bottom of your view. Your current speed sits big in the middle, with your last run's top speed (10 m/s or more) under it, both in Echo's own font, and a mute icon and connection bars either side. A steady glow lights the edges of your view when your hands push lined up above 3.5 m/s, and a green/red flash shows when you're stunned (green = your shield was up). Echo's visor lines and its own speed/mute/connection icons are hidden so they don't overlap. Gauges are off but still there if you want them: the wrist-thruster rings, speed rings 1–5 and a 7-second top speed each come back with one setting.
 - **Echo Arcade**: a gamepad tab on the hand tablet with **RetroArch** (30+ systems), DOOM, Duck Hunt, your movies, YouTube and Balatro (from your own Steam copy). It can show on the big lobby posters, and **FREEZE** holds you still while your Touch controllers play RetroArch.
 
 Everything runs on your own PC. Nothing here is networked and only you see your tablet.

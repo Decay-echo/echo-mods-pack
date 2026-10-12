@@ -467,17 +467,18 @@ unsigned refresh(Session session, const QuadLayer** out) {
     }
 
     // wrist thruster gauges in the HUD colour, the mute icon in the left ring and the
-    // connection bars in the right one
-    if (showThrusters) {
+    // connection bars in the right one (rings=0: just the icons)
+    if (showThrusters && (settings.rings || settings.icons)) {
         int bars = pingBars(s.local.ping, settings.pingBars);
         bool pressedKnown = s.voiceAt >= 0 && t - s.voiceAt < 0.5;
         bool talk = talking(s.local.muted, s.local.voiceMode, pressedKnown && s.voicePressed);
         for (int side = 0; side < 2; side++) {
             int h = settings.swapHands ? 1 - side : side;
             int icon = !settings.icons ? 0 : side == 0 ? 1 + int(talk) : 10 + bars;
-            int key = ((th.on[h] ? int(score[h] * 120) + 1 : 0) * 16 + icon) * 4 + colorKey;
+            int gauge = settings.rings && th.on[h] ? int(score[h] * 120) + 1 : 0;
+            int key = (gauge * 16 + icon) * 4 + colorKey;
             if (key != ov.thrustKey[side]) {
-                drawThrusterCell(ov.canvas, kThrustRect[side], side, score[h], th.on[h], hud, settings.icons, talk, bars);
+                drawThrusterCell(ov.canvas, kThrustRect[side], side, score[h], th.on[h], hud, settings.icons, talk, bars, settings.rings);
                 ov.thrustKey[side] = key;
                 ov.dirty = true;
             }
@@ -604,6 +605,7 @@ void readSettings(const std::wstring& ini) {
     s.thrusterY = f(L"thrusters", L"y_px", s.thrusterY, -400.f, 400.f);
     s.swapHands = b(L"thrusters", L"swap_hands", s.swapHands);
     s.icons = b(L"thrusters", L"icons", s.icons);
+    s.rings = b(L"thrusters", L"rings", s.rings);
     s.edgeGlow = b(L"thrusters", L"screen_glow", s.edgeGlow);
     s.edgeGlowStrength = f(L"thrusters", L"screen_glow_strength", s.edgeGlowStrength, 0.f, 1.f);
     s.edgeGlowPeak = f(L"thrusters", L"screen_glow_peak", s.edgeGlowPeak, s.edgeGlowStrength, 1.f);
