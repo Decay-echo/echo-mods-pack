@@ -92,6 +92,12 @@ struct Shared {
     volatile LONG64 padTick;        // game -> host: GetTickCount64 of the last pad update
     PadState pad;                   // game -> host: the real controllers (writePad / readPad)
 
+    // ---- voice chat: Echo's own "voipmode" setting, switched from the tablet ----
+    volatile LONG voiceWant;        // host -> game: 1 + the mode to set (0 muted, 1 open mic, 2 push to talk, 3 push to mute)
+    volatile LONG voiceSerial;      // host -> game: bumped for each request
+    volatile LONG voiceDone;        // game -> host: last voiceSerial handled
+    volatile LONG voiceState;       // game -> host: the mode in the game now, -1 while not known
+
     alignas(4096) uint8_t frames[FRAME_BUFFERS][FRAME_BYTES];
 };
 #pragma warning(pop)

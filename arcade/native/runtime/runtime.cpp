@@ -11,6 +11,7 @@
 #include "d3d12_stream.h"
 #include "ovr_tweaks.h"
 #include "posters.h"
+#include "voice.h"
 #include "tablet_scale.h"
 #include "log.h"
 #include <algorithm>
@@ -426,6 +427,7 @@ void heartbeatLoop() {
             if (shared->tabletScale > 0) tablet::request(shared->tabletScale / 1000.f);
             posters::heartbeat(now);
             controllers::tick(now);
+            voice::heartbeat(now);
         }
         stream::setVisible(visible);
     }
@@ -461,6 +463,7 @@ void initialize() {
     logf("tablet hooks installed; %u touch cells", unsigned(cellIndex.size()));
     if (shared) posters::install(exe, shared);  // DOCK, poster touch and light gun (disables only itself on a mismatch)
     if (shared) controllers::install(exe, shared);  // CONTROLLERS: hooks go in the first time it's switched on
+    voice::attach(shared);                          // VOICE: Echo's voice chat mode from the tablet
     std::thread(heartbeatLoop).detach();
     if (shared) stream::install(shared);
 }
@@ -483,6 +486,7 @@ void start(HMODULE self) {
             FreeEnvironmentStringsW(block);
         }
         tweaks::start(pluginDir);  // independent of the tablet: must beat the game's first Oculus FOV query
+        voice::hookEarly(reinterpret_cast<unsigned char*>(GetModuleHandleW(nullptr)));  // must beat the game's settings load
         tablet::start(pluginDir);
         // Hooks and the probe D3D12 device are created off the loader thread.
         HANDLE t = CreateThread(nullptr, 0, [](LPVOID) -> DWORD { initialize(); return 0; }, nullptr, 0, nullptr);

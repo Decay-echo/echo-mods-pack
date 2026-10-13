@@ -30,7 +30,7 @@ Only want one of them? `INSTALL.cmd --no-arcade` (HUD only) or `INSTALL.cmd --no
 
 **Performance.** The HUD paints on a thread of its own and costs Echo's render thread about 50 microseconds a frame. If Echo stutters with the pack installed, look at `%LOCALAPPDATA%\EchoHudPlus\hudplus.log`: once a minute it says how long the HUD took.
 
-**Settings are on the tablet.** Open the hand tablet, press the arcade's **gear** tab: one page each for the tablet, the HUD, the screen effects and NORMAL. Every switch applies right away (hiding Echo's visor lines: from the next start). **NORMAL > ALL OFF** puts everything back to Echo's normal at once and **ALL BACK ON** undoes it; **NORMAL TABLET** (tap twice) also takes the arcade, HUD and HUD lines out when you close Echo VR, and `INSTALL.cmd` brings them back.
+**Settings are on the tablet.** Open the hand tablet, press the arcade's **gear** tab: one page each for the tablet, the HUD, passes, the screen effects, Echo's voice chat mode (MUTED / OPEN MIC / PUSH TO TALK / PUSH TO MUTE as separate buttons, switched live) and NORMAL. Every switch applies right away (hiding Echo's visor lines: from the next start). **NORMAL > ALL OFF** puts everything back to Echo's normal at once and **ALL BACK ON** undoes it; **NORMAL TABLET** (tap twice) also takes the arcade, HUD and HUD lines out when you close Echo VR, and `INSTALL.cmd` brings them back.
 
 **HUD.** It's at the bottom of your view, the pass counter at the top. The pass counter needs Echo's **Settings > Game > API access** on. Every setting (positions, sizes, colours, the glow) is also in `bin\win10\plugins\EchoHudPlus\settings.ini` in your Echo VR folder. Details: [hudplus/README.md](hudplus/README.md).
 

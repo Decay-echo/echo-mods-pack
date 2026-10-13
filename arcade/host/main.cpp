@@ -1210,6 +1210,25 @@ private:
             pages_.push_back(p);
         }
 
+        // Echo's own voice chat mode, one button each: the game's "voipmode" setting switched
+        // live by the plugin (the game keeps it in memory) and written to settings_mp_v2.json
+        // so it stays after a restart. The lit button is the mode the game reports.
+        {
+            Page vp{L"VOICE"};
+            static const wchar_t* const labels[4] = {L"MUTED", L"OPEN MIC", L"PUSH TO TALK", L"PUSH TO MUTE"};
+            static const wchar_t* const notes[4] = {L"Nobody hears you", L"Your mic is always on", L"Hold the button to talk",
+                                                    L"Hold the button to go quiet"};
+            for (int m = 0; m < 4; m++) {
+                Option o{labels[m], notes[m], Kind::Action};
+                o.get = [this, m] { return voiceMode() == m ? 1.f : 0.f; };
+                o.set = [this, m](float) { setVoiceMode(m); };
+                o.text = [m](float v) { return std::wstring(v != 0 ? L"\x25CF  " : L"") + labels[m]; };
+                vp.options.push_back(o);
+            }
+            vp.footer = L"The lit one is what Echo uses now. Same as Echo's Settings > Audio; it stays after a restart.";
+            pages_.push_back(vp);
+        }
+
         Page normal{L"NORMAL"};
         Option off{L"Everything off", L"HUD, glow, visor lines, disc button, auto dock, tablet size", Kind::Action};
         off.get = [this] { return allOff() ? 1.f : 0.f; };
@@ -1226,6 +1245,55 @@ private:
 
         page_ = std::clamp(page_, 0, int(pages_.size()) - 1);
         refreshOptions();
+    }
+    static std::wstring voiceFile() {
+        wchar_t base[MAX_PATH];
+        if (!GetEnvironmentVariableW(L"LOCALAPPDATA", base, MAX_PATH)) return {};
+        return std::wstring(base) + L"\\rad\\loneecho\\settings_mp_v2.json";
+    }
+    // Echo's voice chat mode: what the game reports while it runs, else the settings file's "voipmode".
+    int voiceMode() const {
+        LONG live = standalone_ ? -1 : shared_->voiceState;
+        if (live >= 0 && live <= 3) return int(live);
+        std::string text;
+        if (!readFile(voiceFile(), text)) return -1;
+        size_t at = text.find("\"voipmode\"");
+        if (at == std::string::npos) return -1;
+        at = text.find(':', at);
+        if (at == std::string::npos) return -1;
+        at++;
+        while (at < text.size() && (text[at] == ' ' || text[at] == '\t')) at++;
+        return at < text.size() && text[at] >= '0' && text[at] <= '3' ? text[at] - '0' : -1;
+    }
+    void setVoiceMode(int mode) {
+        static const wchar_t* const names[4] = {L"muted", L"open mic", L"push to talk", L"push to mute"};
+        if (!standalone_) {  // the game switches it in memory
+            shared_->voiceWant = mode + 1;
+            MemoryBarrier();
+            InterlockedIncrement(&shared_->voiceSerial);
+        }
+        // And the file, so it holds after a restart: the number after "voipmode": is replaced in place.
+        std::string text;
+        bool saved = false;
+        if (readFile(voiceFile(), text)) {
+            size_t at = text.find("\"voipmode\"");
+            if (at != std::string::npos && (at = text.find(':', at)) != std::string::npos) {
+                at++;
+                while (at < text.size() && (text[at] == ' ' || text[at] == '\t')) at++;
+                size_t end = at;
+                while (end < text.size() && text[end] >= '0' && text[end] <= '9') end++;
+                if (end > at) {
+                    text.replace(at, end - at, std::to_string(mode));
+                    FILE* f = nullptr;
+                    if (_wfopen_s(&f, voiceFile().c_str(), L"wb") == 0 && f) {
+                        saved = fwrite(text.data(), 1, text.size(), f) == text.size();
+                        fclose(f);
+                    }
+                }
+            }
+        }
+        hostLog("voice: %ls (%d) asked%s", names[mode], mode, saved ? ", saved to settings_mp_v2.json" : "; the settings file was NOT updated");
+        message_ = std::wstring(L"Voice chat: ") + names[mode] + (saved ? L"" : L" (could not write Echo's settings file)");
     }
     void refreshOptions() {
         for (auto& p : pages_)
