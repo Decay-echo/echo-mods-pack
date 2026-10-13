@@ -14,13 +14,15 @@ Everything runs on your own PC. Nothing here is networked and only you see your 
 3. **Close Echo VR**, then double-click **`INSTALL.cmd`**. It finds Echo VR by itself (or asks for the folder), downloads what the arcade needs (RetroArch and its cores: about 350 MB to download, 1.5 GB once unpacked), reads the HUD font from your own game files and installs everything. Takes a few minutes.
 4. Start Echo VR.
 
-Needs **EchoLoader** in the game (the community Echo VR installer sets it up). The pack carries a known-good copy (`loader\dbgcore.dll`): INSTALL puts it in when the game has none, and `INSTALL.cmd --loader` replaces a different build with it (if your plugins never load: no HUD, the arcade tab does nothing), keeping the old one as `dbgcore.dll.before-pack`. The HUD lines part also needs **NvrAssetPatches**; without it the installer skips that part and tells you.
+Needs **EchoLoader** in the game. The pack carries a known-good copy (`loader\dbgcore.dll`) and INSTALL puts it in: when the game has none, and in place of a different build (the usual reason nothing of the pack shows up), which is kept as `dbgcore.dll.before-pack`. `INSTALL.cmd --keep-loader` leaves the game's own in. The HUD lines part also needs **NvrAssetPatches**; without it the installer skips that part and tells you.
 
 **Already have another tablet mod** (TabletDoom, TabletMusic, anything that changes the tablet)? Just run INSTALL.cmd: it puts Echo's stock tablet data back first, from the backup that mod kept, removes that mod's files from the tablet data, and then installs Echo Arcade. If it can't find a stock copy it stops and tells you (run that mod's own restore, or reinstall Echo VR, then INSTALL again).
 
 To remove everything, close Echo VR and double-click **`UNINSTALL.cmd`** (or, in the game, tablet **Settings > NORMAL > NORMAL TABLET**, which does it when you close Echo). Echo VR gets its own files back. Running `INSTALL.cmd` again updates or repairs the install. An update keeps your HUD settings; to switch to a new version's HUD layout, run `INSTALL.cmd --reset-hud` (your old settings are kept as `settings.ini.old`).
 
 Only want one of them? `INSTALL.cmd --no-arcade` (HUD only) or `INSTALL.cmd --no-hud` (arcade only).
+
+**Personal disc** (optional, a separate download): [EchoPersonalDisc.zip](https://github.com/Decay-echo/echo-personal-disc-addon/releases/latest/download/EchoPersonalDisc.zip). Put the zip in your EchoModsPack folder (or unzip it there, or next to the pack folder) and run **INSTALL.cmd**: the disc goes in with the rest, UNINSTALL takes it out, CHECK shows it. You get the personal disc everywhere but live play (lobby, timeouts, and from a goal until the launcher countdown ends), and **X on the left controller** brings it to your hand (the tablet's Settings > DISC changes the button). Nothing of it is installed when the zip isn't there.
 
 **Something not showing up in the game?** Start Echo VR once, open the tablet, close Echo, then double-click **`CHECK.cmd`**: it writes `check.txt` (what is installed, whether EchoLoader loaded the plugins, the mods' own logs, antivirus detections). Paste that file when asking for help.
 

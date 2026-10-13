@@ -8,8 +8,13 @@ Options: --game PATH   your ready-at-dawn-echo-arena folder (found by itself in 
          --no-arcade   only the HUD
          --no-hud      only Echo Arcade
          --reset-hud   switch to this version's HUD settings (an earlier install keeps its own otherwise)
-         --loader      put the pack's EchoLoader (loader/dbgcore.dll) in the game even if one is there
-                       (a different build that loads no plugins); the old one is kept as dbgcore.dll.before-pack
+         --keep-loader keep the game's own EchoLoader (bin/win10/dbgcore.dll). Without this, the pack's
+                       copy goes in: a different build is replaced (kept as dbgcore.dll.before-pack), since
+                       a loader that loads no plugins is the usual reason nothing of the pack shows up
+         --no-disc     leave the personal disc out even when its add-on is here
+
+The personal disc is a separate download (EchoPersonalDisc.zip): put it in this folder, or next
+to it, and INSTALL puts it in too (UNINSTALL takes it out). Without it, nothing of the disc.
 
 Close Echo VR first. Needs Python 3.10+, internet (Python packages, RetroArch and the other
 arcade apps), and EchoLoader in the game (the community Echo VR installer sets it up).
@@ -24,6 +29,7 @@ import struct
 import subprocess
 import sys
 import time
+import zipfile
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -34,6 +40,53 @@ PKG_TOOLS = ARCADE / 'vendor' / 'Doom-on-EchoVR' / 'EchoVr-Tablet-Probing'  # Ec
 ECHO_BUILD = 1683152886  # echovr.exe timestamp of the final Echo VR build (the one community servers run)
 LOADER = HERE / 'loader' / 'dbgcore.dll'  # EchoLoader as the community installer sets it up (see loader\README.txt)
 LOADER_JSON = {'log_path': 'plugin_logs', 'plugins_dir': 'plugins', 'plugins': []}
+DISC_NAME = 'EchoPersonalDisc'  # the add-on's zip / folder name
+DISC_LINK = 'https://github.com/Decay-echo/echo-personal-disc-addon/releases/latest/download/EchoPersonalDisc.zip'
+
+
+def disc_here(folder: Path):
+    return (folder / 'patch_personal_disc.py').is_file() and (folder / 'discbutton' / 'install_discbutton.py').is_file()
+
+
+def find_disc():
+    """The Personal Disc add-on, when it is here: a `disc` or `EchoPersonalDisc` folder in this
+    folder or an `EchoPersonalDisc` folder next to it (unzipped, with or without its top folder),
+    else the newest EchoPersonalDisc*.zip here, next to this folder or in Downloads, unpacked
+    into `disc`. None when it is nowhere."""
+    for folder in (HERE / 'disc', HERE / DISC_NAME, HERE.parent / DISC_NAME):
+        for candidate in (folder, folder / DISC_NAME):
+            if disc_here(candidate):
+                return candidate
+    zips = []
+    for where in (HERE, HERE.parent, Path.home() / 'Downloads'):
+        try:
+            zips += [z for z in where.glob(DISC_NAME + '*.zip') if z.is_file()]
+        except OSError:
+            pass
+    for z in sorted(zips, key=lambda z: z.stat().st_mtime, reverse=True):
+        try:
+            with zipfile.ZipFile(z) as zf:
+                names = [n for n in zf.namelist() if not n.endswith('/')]
+                roots = {n.split('/')[0] for n in names if n.count('/') >= 1 and n.endswith('patch_personal_disc.py')}
+                root = (roots.pop() + '/') if roots and 'patch_personal_disc.py' not in names else ''
+                if not root and 'patch_personal_disc.py' not in names:
+                    continue
+                target = HERE / 'disc'
+                if target.exists():
+                    import shutil
+                    shutil.rmtree(target)
+                for n in names:
+                    if not n.startswith(root) or '..' in n.split('/'):
+                        continue
+                    dest = target / n[len(root):]
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    dest.write_bytes(zf.read(n))
+            if disc_here(target):
+                print(f'Personal disc add-on: {z.name} unpacked into {target}')
+                return target
+        except (OSError, zipfile.BadZipFile) as e:
+            print(f'Personal disc add-on: {z} could not be read ({e})')
+    return None
 
 
 def game_helpers():
@@ -105,9 +158,9 @@ def sha256(path: Path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def ensure_loader(game: Path, force: bool):
-    """EchoLoader in the game: the pack's copy goes in when there is none (or with --loader);
-    a different build that is there is left alone otherwise, with a word about --loader."""
+def ensure_loader(game: Path, keep: bool):
+    """EchoLoader in the game: the pack's copy goes in when there is none, and in place of a
+    different build (kept as dbgcore.dll.before-pack) unless --keep-loader."""
     win10 = game / 'bin' / 'win10'
     dll, cfg = win10 / 'dbgcore.dll', win10 / 'echoloader.json'
     if not LOADER.is_file():
@@ -118,7 +171,7 @@ def ensure_loader(game: Path, force: bool):
         return
     if dll.is_file() and sha256(dll) == sha256(LOADER):
         pass
-    elif not dll.is_file() or force:
+    elif not dll.is_file() or not keep:
         if dll.is_file():
             backup = dll.with_name('dbgcore.dll.before-pack')
             if not backup.exists():
@@ -131,15 +184,15 @@ def ensure_loader(game: Path, force: bool):
         import shutil
         shutil.copy2(LOADER, dll)
     else:
-        print('NOTE: the game\'s EchoLoader (bin\\win10\\dbgcore.dll) is a different build than the pack\'s. If the plugins do not '
-              'load (no HUD, the arcade tab does nothing), run INSTALL.cmd --loader to use the pack\'s.')
+        print('NOTE: the game\'s EchoLoader (bin\\win10\\dbgcore.dll) is a different build than the pack\'s and stays (--keep-loader). '
+              'If the plugins do not load (no HUD, the arcade tab does nothing), run INSTALL.cmd without it.')
     if not cfg.is_file():
         cfg.write_text(json.dumps(LOADER_JSON, indent=4) + '\n', encoding='utf-8')
         print('Created bin\\win10\\echoloader.json.')
     (win10 / 'plugins').mkdir(exist_ok=True)
 
 
-def check_game(game: Path, want_hud_lines: bool, loader: bool = False):
+def check_game(game: Path, want_hud_lines: bool, keep_loader: bool = False):
     """Stops on what can't work; returns whether the HUD lines (NvrAssetPatches) can go in."""
     win10 = game / 'bin' / 'win10'
     exe = win10 / 'echovr.exe'
@@ -148,7 +201,7 @@ def check_game(game: Path, want_hud_lines: bool, loader: bool = False):
     if exe_timestamp(exe) != ECHO_BUILD:
         stop('This Echo VR build is not the one the pack was made for (the final build community servers use). '
              'Nothing was changed.')
-    ensure_loader(game, loader)
+    ensure_loader(game, keep_loader)
     if not want_hud_lines:
         return False
     has_plugin = (win10 / 'plugins' / 'NvrAssetPatches.dll').is_file() and 'nvrassetpatches.dll' in loader_plugins(win10)
@@ -181,8 +234,9 @@ def install(args):
     print('game:', game)
     if g.game_running():
         stop('Echo VR is running. Close it completely, then run this again.')
-    hud_lines = check_game(game, not args.no_hud, args.loader)
-    total = 6
+    hud_lines = check_game(game, not args.no_hud, args.keep_loader)
+    disc = None if args.no_disc else find_disc()
+    total = 7
     print(f'\n[1/{total}] Python environment')
     python_env()
     print(f'\n[2/{total}] Downloads (Echo package tools{", RetroArch + cores, LOVE, mpv, DOOM shareware" if not args.no_arcade else ""})')
@@ -222,6 +276,19 @@ def install(args):
         print('would install', ', '.join(p.name for p in sorted((HERE / 'hud_lines' / 'patch').iterdir())))
     else:
         run([VENV_PY, HERE / 'hud_lines' / 'install_hud_lines.py', '--target', game], 'Installing the HUD lines')
+    print(f'\n[7/{total}] Personal disc (a separate download)')
+    if args.no_disc:
+        print('skipped (--no-disc)')
+    elif not disc:
+        print('not here: nothing of the disc is installed. For it, download ' + DISC_LINK)
+        print('into this folder and run INSTALL.cmd again.')
+    elif args.dry_run:
+        print('from', disc)
+        run([VENV_PY, disc / 'patch_personal_disc.py', '--target', game, '--check'], 'Checking the personal disc patch', check=False)
+    else:
+        print('from', disc)
+        run([VENV_PY, disc / 'patch_personal_disc.py', '--target', game], 'Installing the personal disc patch')
+        run([VENV_PY, disc / 'discbutton' / 'install_discbutton.py', '--target', game], 'Installing the disc button')
     if args.dry_run:
         print('\nDRY RUN finished: the game was not changed.')
         return
@@ -229,6 +296,9 @@ def install(args):
     if not args.no_hud:
         print(' - HUD: at the bottom of your view, the pass counter at the top (it needs Echo\'s Settings > Game > '
               'API access on).')
+    if disc:
+        print(' - Personal disc: everywhere but live play; press X on the left controller and it comes to your hand '
+              '(the DISC page of the tablet\'s settings changes the button).')
     if not args.no_arcade:
         print(' - Settings: the arcade\'s gear tab on the hand tablet (HUD, glow, visor lines, and NORMAL to switch it '
               'all off, or take it all out when Echo closes).')
@@ -271,7 +341,7 @@ def check(args):
     dll = win10 / 'dbgcore.dll'
     if dll.is_file():
         same = LOADER.is_file() and sha256(dll) == sha256(LOADER)
-        say(f'  dbgcore.dll: {dll.stat().st_size} bytes, sha256 {sha256(dll)[:16]}... ' + ('(the pack\'s build)' if same else '(a DIFFERENT build than the pack\'s: INSTALL.cmd --loader uses the pack\'s)'))
+        say(f'  dbgcore.dll: {dll.stat().st_size} bytes, sha256 {sha256(dll)[:16]}... ' + ('(the pack\'s build)' if same else '(a DIFFERENT build than the pack\'s: INSTALL.cmd puts the pack\'s in)'))
     else:
         say('  dbgcore.dll: MISSING (EchoLoader is not installed)')
     log_dir = 'plugin_logs'
@@ -352,6 +422,40 @@ def check(args):
         for l in keep[-40:]:
             say('    ' + l.strip()[:200])
     say('')
+    say('[personal disc]')
+    disc = find_disc()
+    say('  add-on: ' + (str(disc) if disc else 'not here (a separate download: ' + DISC_LINK + ')'))
+    try:
+        scripts = win10 / 'scripts'
+        known = {}
+        if disc:  # the patcher's own records: stock and patched hashes of both DLLs
+            text = (disc / 'patch_personal_disc.py').read_text(encoding='utf-8', errors='replace')
+            import re
+            for name, stock, patched in re.findall(r"'([0-9a-f]{16}\.dll)': \{'stock': '([0-9a-f]{64})', 'patched': '([0-9a-f]{64})'", text):
+                known.setdefault(name, (stock, []))[1].append(patched)  # this version's record first, older ones after
+        for name in ('351c49438bd38225.dll', '38965d90a823f03f.dll'):
+            f = scripts / name
+            if not f.is_file():
+                say(f'  {name}: MISSING')
+                continue
+            h = sha256(f)
+            stock, patched = known.get(name, ('', []))
+            state = ('stock (no disc patch)' if h == stock else 'PATCHED (this add-on\'s version)' if patched and h == patched[0]
+                     else 'patched, an OLDER version (INSTALL updates it)' if h in patched else 'unknown version' if known else '')
+            say(f'  {name}: sha256 {h[:16]}... {state}')
+        button = win10 / 'plugins' / 'DiscButton.dll'
+        say('  DiscButton.dll: ' + (f'{button.stat().st_size} bytes' if button.is_file() else 'not installed'))
+        ini = win10 / 'plugins' / 'DiscButton' / 'settings.ini'
+        if ini.is_file():
+            say('  settings.ini: ' + ' | '.join(l.strip() for l in ini.read_text(encoding='utf-8', errors='replace').splitlines() if l.strip() and not l.startswith(';'))[:200])
+        lines = tail(local / 'DiscButton' / 'discbutton.log', 6)
+        if lines:
+            say('  discbutton.log (last lines):')
+            for l in lines:
+                say('    ' + l.strip()[:160])
+    except OSError as e:
+        say(f'  could not look: {e}')
+    say('')
     say('[tablet data]')
     try:
         sys.path.insert(0, str(ARCADE / 'tools'))
@@ -407,6 +511,14 @@ def uninstall(args):
         run([VENV_PY, HERE / 'hudplus' / 'install_hudplus.py', '--target', game, '--uninstall'], 'Removing the HUD')
     if not args.no_arcade:
         run([VENV_PY, ARCADE / 'tools' / 'install.py', 'uninstall', '--game', game], 'Removing Echo Arcade', cwd=ARCADE)
+    disc = None if args.no_disc else find_disc()
+    if disc:
+        if (win10 / 'plugins' / 'DiscButton.dll').is_file():
+            run([VENV_PY, disc / 'discbutton' / 'install_discbutton.py', '--target', game, '--uninstall'], 'Removing the disc button', check=False)
+        if not run([VENV_PY, disc / 'patch_personal_disc.py', '--target', game, '--restore'], 'Restoring the original DLLs', check=False):
+            print('(the disc patch was not in, or not this version: nothing to restore)')
+    elif (win10 / 'plugins' / 'DiscButton.dll').is_file():
+        print('The personal disc stays in: its add-on (EchoPersonalDisc) is not here. Its own RESTORE.cmd puts the original DLLs back.')
     print('\nDone: Echo VR is back to its own files (your arcade games and downloads stay in this folder).')
 
 
@@ -415,9 +527,11 @@ def main():
     ap.add_argument('--game', help='your ready-at-dawn-echo-arena folder')
     ap.add_argument('--uninstall', action='store_true')
     ap.add_argument('--check', action='store_true', help='what is installed and whether it ran (writes check.txt)')
-    ap.add_argument('--loader', action='store_true', help="put the pack's EchoLoader in the game even if a different build is there")
+    ap.add_argument('--keep-loader', action='store_true', help="keep the game's own EchoLoader instead of the pack's")
+    ap.add_argument('--loader', action='store_true', help=argparse.SUPPRESS)  # earlier versions: now the default
     ap.add_argument('--no-arcade', action='store_true', help='leave Echo Arcade out')
     ap.add_argument('--no-hud', action='store_true', help='leave the HUD out')
+    ap.add_argument('--no-disc', action='store_true', help='leave the personal disc out even when its add-on is here')
     ap.add_argument('--dry-run', action='store_true', help='download and prepare everything, but change nothing in the game')
     ap.add_argument('--reset-hud', action='store_true', help="use this pack's HUD settings (the old ones are kept as settings.ini.old)")
     args = ap.parse_args()

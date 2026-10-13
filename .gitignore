@@ -9,6 +9,10 @@ hudplus/data/
 hud_lines/patch/
 # The pack's zip (a release download, not part of the repo)
 /dist/
+# The personal disc add-on, when it is dropped here (a separate download)
+/disc/
+/EchoPersonalDisc*/
+/EchoPersonalDisc*.zip
 __pycache__/
 check.txt
 last_install.txt
