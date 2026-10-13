@@ -196,10 +196,21 @@ U nameOf(void* gs, U handle) {
     return NONE;
 }
 
-// Which POSTERS entry a poster-system key is, or -1.
+// Which POSTERS entry a poster-system key is, or -1. The social lobby's central display carries
+// a server name in the +0xb8 table (c8c33e48396521e1..e4) as well as its actor name at +0x80;
+// whichever of the two the table knows counts.
 int posterOf(void* gs, U handle) {
-    auto it = table.find(nameOf(gs, handle));
-    return it == table.end() ? -1 : int(it->second);
+    P names = at<P>(gs, 0x370);
+    if (!names) return -1;
+    size_t index = size_t(handle & 0xffff);
+    for (size_t list : {size_t(0xb8), size_t(0x80)}) {
+        P a = at<P>(names, list);
+        U name = a ? at<U>(a, index * 8) : NONE;
+        if (name == NONE) continue;
+        auto it = table.find(name);
+        if (it != table.end()) return int(it->second);
+    }
+    return -1;
 }
 
 bool hasFace(unsigned mesh) { return mesh != POSTER_NO_MESH; }
