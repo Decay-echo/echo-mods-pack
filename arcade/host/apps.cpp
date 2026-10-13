@@ -341,7 +341,7 @@ void Session::poll() {
                     minecraftGame_ = w.game;
                     DWORD gamePid = 0;
                     GetWindowThreadProcessId(w.game, &gamePid);
-                    hostLog("minecraft: game window %p (pid %lu)", static_cast<void*>(w.game), gamePid);
+                    hostLog("minecraft: game window %p (pid %lu, class %ls, \"%ls\")", static_cast<void*>(w.game), gamePid, w.gameClass, w.gameTitle);
                     if (gamePid) routeAudioLater(gamePid, findAudioDevice(config_.audioDevice), config_.appVolume, "minecraft");
                 }
                 HWND hwnd = window_;

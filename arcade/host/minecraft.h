@@ -75,19 +75,37 @@ inline void prepareOptions() {
     }
 }
 
-// The game's window (GLFW, "Minecraft ...") if it is up, else the launcher's: the process we
-// started, or a window named after the launcher (CurseForge runs inside Overwolf, the Store
-// launcher inside its own container: neither is our process).
+// The process behind a window is Java (the game, whatever a mod pack calls its window).
+inline bool isJava(DWORD pid) {
+    HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (!h) return false;
+    wchar_t path[MAX_PATH];
+    DWORD n = MAX_PATH;
+    bool ok = QueryFullProcessImageNameW(h, 0, path, &n) != 0;
+    CloseHandle(h);
+    if (!ok) return false;
+    std::wstring name = path;
+    name = name.substr(name.find_last_of(L"\\/") + 1);
+    for (auto& ch : name) ch = wchar_t(towlower(ch));
+    return name == L"javaw.exe" || name == L"java.exe";
+}
+
+// The game's window if it is up (modern Minecraft: class GLFW30; 1.12 and older: LWJGL; a mod
+// pack can call its window anything, so any big window of a Java process counts too), else the
+// launcher's: the process we started, or a window named after the launcher (CurseForge runs
+// inside Overwolf, the Store launcher inside its own container: neither is our process).
 struct Windows {
     HWND game = nullptr, launcher = nullptr;
+    wchar_t gameClass[64] = L"", gameTitle[128] = L"";
 };
 inline Windows find(DWORD launcherPid, const wchar_t* launcherTitle = L"Minecraft Launcher") {
-    struct Ctx { DWORD pid; const wchar_t* title; Windows w; } ctx{launcherPid, launcherTitle, {}};
+    struct Ctx { DWORD pid; const wchar_t* title; Windows w; int gameScore; long long gameArea; } ctx{launcherPid, launcherTitle, {}, 0, 0};
     EnumWindows([](HWND hwnd, LPARAM p) -> BOOL {
         auto c = reinterpret_cast<Ctx*>(p);
         if (!IsWindowVisible(hwnd) || GetWindow(hwnd, GW_OWNER)) return TRUE;
         RECT r{};
         GetWindowRect(hwnd, &r);
+        long long area = (long long)(r.right - r.left) * (r.bottom - r.top);
         if (r.right - r.left < 100 || r.bottom - r.top < 100) return TRUE;
         wchar_t cls[64] = L"", title[128] = L"";
         GetClassNameW(hwnd, cls, 64);
@@ -95,8 +113,17 @@ inline Windows find(DWORD launcherPid, const wchar_t* launcherTitle = L"Minecraf
         DWORD pid = 0;
         GetWindowThreadProcessId(hwnd, &pid);
         if (pid == GetCurrentProcessId()) return TRUE;
-        if (!c->w.game && !wcscmp(cls, L"GLFW30") && wcsstr(title, L"Minecraft")) c->w.game = hwnd;
-        else if (!c->w.launcher && (pid == c->pid || (c->title && *c->title && wcsstr(title, c->title)))) c->w.launcher = hwnd;
+        bool gameClass = !wcscmp(cls, L"GLFW30") || !wcscmp(cls, L"LWJGL");
+        int score = gameClass ? 3 : (r.right - r.left >= 400 && r.bottom - r.top >= 300 && isJava(pid)) ? 2 : 0;
+        if (score && (score > c->gameScore || (score == c->gameScore && area > c->gameArea))) {
+            c->w.game = hwnd;
+            c->gameScore = score;
+            c->gameArea = area;
+            wcscpy_s(c->w.gameClass, cls);
+            wcscpy_s(c->w.gameTitle, title);
+        } else if (!score && !c->w.launcher && (pid == c->pid || (c->title && *c->title && wcsstr(title, c->title)))) {
+            c->w.launcher = hwnd;
+        }
         return TRUE;
     }, reinterpret_cast<LPARAM>(&ctx));
     return ctx.w;
