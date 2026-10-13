@@ -48,6 +48,72 @@ def disc_here(folder: Path):
     return (folder / 'patch_personal_disc.py').is_file() and (folder / 'discbutton' / 'install_discbutton.py').is_file()
 
 
+def disc_records(disc: Path):
+    """The patcher's own records: {dll name: (stock sha256, [patched sha256s, this version's first])}."""
+    import re
+    known = {}
+    try:
+        text = (disc / 'patch_personal_disc.py').read_text(encoding='utf-8', errors='replace')
+    except OSError:
+        return known
+    for name, stock, patched in re.findall(r"'([0-9a-f]{16}\.dll)': \{'stock': '([0-9a-f]{64})', 'patched': '([0-9a-f]{64})'", text):
+        known.setdefault(name, (stock, []))[1].append(patched)
+    return known
+
+
+def disc_dll_state(h, stock, patched):
+    if h == stock:
+        return 'stock'
+    if patched and h == patched[0]:
+        return 'this version'
+    if h in patched:
+        return 'older version'
+    return 'unknown'
+
+
+def stock_copies(scripts: Path, name: str, stock: str):
+    """Files next to the DLL that are the original (any mod's backup, checked by hash)."""
+    found = []
+    try:
+        for f in sorted(scripts.iterdir()):
+            if f.is_file() and f.name != name and name[:16] in f.name and f.stat().st_size < 4_000_000 and sha256(f) == stock:
+                found.append(f)
+    except OSError:
+        pass
+    return found
+
+
+def disc_originals_back(game: Path, disc: Path, dry: bool):
+    """A script DLL that is neither the original nor a disc version the patcher knows (another
+    mod, or an unknown disc version) blocks the patch. When a copy of the original lies next to
+    it, that copy goes back first and the odd DLL is kept as <name>.before-pack. Returns the
+    names still in the way, with their hashes."""
+    scripts = game / 'bin' / 'win10' / 'scripts'
+    blocked = []
+    for name, (stock, patched) in disc_records(disc).items():
+        f = scripts / name
+        if not f.is_file():
+            continue
+        h = sha256(f)
+        if disc_dll_state(h, stock, patched) != 'unknown':
+            continue
+        copies = stock_copies(scripts, name, stock)
+        if not copies:
+            blocked.append((name, h))
+            continue
+        if dry:
+            print(f'{name} is not the original (sha256 {h[:16]}...): would put the original back from {copies[0].name}')
+            continue
+        import shutil
+        keep = f.with_name(name + '.before-pack')
+        if not keep.exists():
+            shutil.copy2(f, keep)
+        shutil.copy2(copies[0], f)
+        print(f'{name} was not the original (another mod? sha256 {h[:16]}...): the original from {copies[0].name} is back; '
+              f'the other one is kept as {keep.name}')
+    return blocked
+
+
 def find_disc():
     """The Personal Disc add-on, when it is here: a `disc` or `EchoPersonalDisc` folder in this
     folder or an `EchoPersonalDisc` folder next to it (unzipped, with or without its top folder),
@@ -282,13 +348,23 @@ def install(args):
     elif not disc:
         print('not here: nothing of the disc is installed. For it, download ' + DISC_LINK)
         print('into this folder and run INSTALL.cmd again.')
-    elif args.dry_run:
-        print('from', disc)
-        run([VENV_PY, disc / 'patch_personal_disc.py', '--target', game, '--check'], 'Checking the personal disc patch', check=False)
     else:
         print('from', disc)
-        run([VENV_PY, disc / 'patch_personal_disc.py', '--target', game], 'Installing the personal disc patch')
-        run([VENV_PY, disc / 'discbutton' / 'install_discbutton.py', '--target', game], 'Installing the disc button')
+        blocked = disc_originals_back(game, disc, args.dry_run)
+        if blocked:
+            for name, h in blocked:
+                print(f'{name} is not the original game file and not a disc version this patch knows (sha256 {h}).')
+            print('NOT INSTALLED: the personal disc needs the original DLLs. If another personal-disc mod is in, run its RESTORE; '
+                  'else put the original file back (a reinstall of Echo VR\'s files does), then INSTALL.cmd again. '
+                  'The rest of the pack is in.')
+            disc = None
+        elif args.dry_run:
+            run([VENV_PY, disc / 'patch_personal_disc.py', '--target', game, '--check'], 'Checking the personal disc patch', check=False)
+        elif not run([VENV_PY, disc / 'patch_personal_disc.py', '--target', game], 'Installing the personal disc patch', check=False):
+            print('NOT INSTALLED: the personal disc patch failed (see above). The rest of the pack is in.')
+            disc = None
+        elif not run([VENV_PY, disc / 'discbutton' / 'install_discbutton.py', '--target', game], 'Installing the disc button', check=False):
+            print('The disc is in, but DiscButton (the summon button) failed to install (see above).')
     if args.dry_run:
         print('\nDRY RUN finished: the game was not changed.')
         return
@@ -305,7 +381,7 @@ def install(args):
         print(' - Arcade: open the hand tablet and press the gamepad tab (far left). FREEZE (top of the launcher) '
               'lets your Touch controllers play RetroArch or Minecraft; both hands above your head for 5 s to move again.')
         print('   Your games go in ' + str(ARCADE / 'apps' / 'roms') + ' (one folder per system, see the README there).')
-    note_outcome('ALL DONE')
+    note_outcome('ALL DONE' + ('' if disc or args.no_disc else ' (without the personal disc)'))
 
 
 def tail(path: Path, n=12):
@@ -427,12 +503,7 @@ def check(args):
     say('  add-on: ' + (str(disc) if disc else 'not here (a separate download: ' + DISC_LINK + ')'))
     try:
         scripts = win10 / 'scripts'
-        known = {}
-        if disc:  # the patcher's own records: stock and patched hashes of both DLLs
-            text = (disc / 'patch_personal_disc.py').read_text(encoding='utf-8', errors='replace')
-            import re
-            for name, stock, patched in re.findall(r"'([0-9a-f]{16}\.dll)': \{'stock': '([0-9a-f]{64})', 'patched': '([0-9a-f]{64})'", text):
-                known.setdefault(name, (stock, []))[1].append(patched)  # this version's record first, older ones after
+        known = disc_records(disc) if disc else {}
         for name in ('351c49438bd38225.dll', '38965d90a823f03f.dll'):
             f = scripts / name
             if not f.is_file():
@@ -440,9 +511,13 @@ def check(args):
                 continue
             h = sha256(f)
             stock, patched = known.get(name, ('', []))
-            state = ('stock (no disc patch)' if h == stock else 'PATCHED (this add-on\'s version)' if patched and h == patched[0]
-                     else 'patched, an OLDER version (INSTALL updates it)' if h in patched else 'unknown version' if known else '')
+            state = {'stock': 'stock (no disc patch)', 'this version': 'PATCHED (this add-on\'s version)',
+                     'older version': 'patched, an OLDER version (INSTALL updates it)',
+                     'unknown': 'NOT the original and not a disc version the add-on knows (another mod?)'}[disc_dll_state(h, stock, patched)] if known else ''
             say(f'  {name}: sha256 {h[:16]}... {state}')
+            if known:
+                copies = stock_copies(scripts, name, stock)
+                say('    copies of the original next to it: ' + (', '.join(c.name for c in copies) if copies else 'none'))
         button = win10 / 'plugins' / 'DiscButton.dll'
         say('  DiscButton.dll: ' + (f'{button.stat().st_size} bytes' if button.is_file() else 'not installed'))
         ini = win10 / 'plugins' / 'DiscButton' / 'settings.ini'
