@@ -23,6 +23,9 @@ SETTINGS = """; EchoHudPlus: your speed and last-run speed with your mute icon a
 ; (negative = up).
 [general]
 enabled=1
+; the HUD paints at most this many pictures a second, on a thread of its own (Echo's
+; render thread spends microseconds on it either way)
+max_fps=60
 
 [layout]
 ; height of the whole cluster, metres from eye level (Echo's own readout, hidden by hud_lines, is at -0.13)

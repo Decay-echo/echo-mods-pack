@@ -21,7 +21,8 @@
 // Game data comes from three hooks in echovr.exe (see game_memory.h), each enabled only
 // if the code at that address is exactly what it was written for. The overlay is one
 // texture shown through head-locked Oculus quad layers that Echo's frames carry to the
-// compositor, the same way the readout's own canvases sit in front of your eyes.
+// compositor, the same way the readout's own canvases sit in front of your eyes. It is
+// painted on a thread of its own; Echo's render thread spends microseconds on it.
 // If the runtime ever rejects a frame with them, that frame is resubmitted without
 // them and the overlay turns off for the session (see the log).
 //
@@ -273,8 +274,9 @@ constexpr int apiPort = 6721;
 #endif
 
 // GET http://127.0.0.1:6721/session. False if the API isn't answering (off, or not in a match).
-bool fetchSession(HINTERNET http, std::string& body) {
-    HINTERNET connection = WinHttpConnect(http, L"127.0.0.1", INTERNET_PORT(int(apiPort)), 0);
+// The connection stays open between asks (dropped and remade after a failure).
+bool fetchSession(HINTERNET http, HINTERNET& connection, std::string& body) {
+    if (!connection) connection = WinHttpConnect(http, L"127.0.0.1", INTERNET_PORT(int(apiPort)), 0);
     if (!connection) return false;
     HINTERNET request = WinHttpOpenRequest(connection, L"GET", L"/session", nullptr, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, 0);
     bool ok = request && WinHttpSendRequest(request, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0) &&
@@ -291,7 +293,7 @@ bool fetchSession(HINTERNET http, std::string& body) {
         if (body.size() > (1 << 20)) { ok = false; break; }
     }
     if (request) WinHttpCloseHandle(request);
-    WinHttpCloseHandle(connection);
+    if (!ok) { WinHttpCloseHandle(connection); connection = nullptr; }
     return ok;
 }
 
@@ -301,14 +303,16 @@ DWORD WINAPI pollPasses(LPVOID) {
     WinHttpSetTimeouts(http, 250, 250, 250, 500);
     bool answering = true;  // for the log: say when the API stops / starts answering
     int parseErrors = 0;
+    HINTERNET connection = nullptr;
     while (true) {
         if (!passesWanted) {
+            if (connection) { WinHttpCloseHandle(connection); connection = nullptr; }
             Sleep(250);
             continue;
         }
         std::string body;
         Possession p;
-        bool got = fetchSession(http, body);
+        bool got = fetchSession(http, connection, body);
         if (got) {
             Json doc;
             if (parseJson(body, doc)) p = readSession(doc);
@@ -323,7 +327,7 @@ DWORD WINAPI pollPasses(LPVOID) {
             state.passes.update(p, now());
             state.apiTeam = p.myTeam;
         }
-        Sleep(got ? 40 : 1000);  // 25 a second in a match; once a second otherwise
+        Sleep(got ? 100 : 1000);  // 10 a second in a match (a catch lasts longer); once a second otherwise
     }
 }
 
@@ -393,32 +397,174 @@ void hookGame() {
 }
 
 // ---- overlay ---------------------------------------------------------------------------
+// Echo's render thread decides only WHAT to show: a DrawJob (a few keys, numbers and strings,
+// built in microseconds from the game state) that it hands to the draw thread. The draw
+// thread paints the cells that changed, encodes the picture and copies it into a staging
+// buffer, at most max_fps times a second. Showing a finished picture, back on the render
+// thread, is one pre-recorded command list and a commit. Nothing slow runs inside Echo's
+// frame; the log says how long our part took, once a minute.
 ID3D12CommandQueue* gameQueue = nullptr;
 enum class Mode { Waiting, Ready, Off } mode = Mode::Waiting;
 size_t headerSize = 0;
 bool triedOtherLayout = false;
 
-struct Overlay {
+struct DrawJob {
+    uint64_t serial = 0;
+    uint32_t generation = 0;  // settings generation: a new one repaints everything
+    float maxFps = 60;
+    int colorKey = 0;
+    Color hud{1, 1, 1};
+    int flashKey = -1;        // stun flash (0..), edge glow (1000..) or nothing (-1)
+    bool flashGreen = false;
+    float flashAlpha = 0, edge = 0;
+    int gaugeKey[2] = {-2, -2};
+    float gaugeFill[2] = {0, 0}, gaugePulse[2] = {0, 0};
+    int thrustKey[2] = {-2, -2};
+    float score[2] = {0, 0};
+    bool thrustOn[2] = {false, false}, icons = true, rings = false, talk = false;
+    int bars = 0;
+    int glowKey[Settings::kRings] = {-2, -2, -2, -2, -2};
+    float glowFill[Settings::kRings] = {}, glowAt[Settings::kRings] = {};
+    char current[16] = "", last[16] = "", peak[16] = "";
+    float currentSize = 0, lastSize = 0;
+    int passKey = -1, passNumber = 0;
+    bool passPlus = false;
+    Color passColor{1, 1, 1};
+    float passAlpha = 0, passScale = 1;
+};
+
+bool sameText(const DrawJob& a, const DrawJob& b) {  // sizes and colour matter only with text to show
+    if (std::strcmp(a.current, b.current) || std::strcmp(a.last, b.last) || std::strcmp(a.peak, b.peak)) return false;
+    return !a.current[0] || (a.currentSize == b.currentSize && a.lastSize == b.lastSize && a.colorKey == b.colorKey);
+}
+bool differs(const DrawJob& a, const DrawJob& b) {
+    if (a.generation != b.generation || a.flashKey != b.flashKey || a.passKey != b.passKey || !sameText(a, b)) return true;
+    for (int i = 0; i < 2; i++)
+        if (a.gaugeKey[i] != b.gaugeKey[i] || a.thrustKey[i] != b.thrustKey[i]) return true;
+    for (int k = 0; k < Settings::kRings; k++)
+        if (a.glowKey[k] != b.glowKey[k]) return true;
+    return false;
+}
+
+struct Overlay {  // the render thread's side
     SwapChain chain = nullptr;
     std::vector<ID3D12Resource*> buffers;
     Uploader uploader;
-    Canvas canvas;
-    std::vector<uint8_t> bytes;
-    bool dirty = true;
-    int gaugeKey[2] = {-2, -2};
+    DrawJob lastJob;  // what the draw thread was last asked for
+    uint64_t serial = 0;
+    uint32_t generation = 0;
     double readyAt[2] = {-1, -1};
     float lastFill[2] = {1, 1};
-    std::string text = "||";  // the key for "nothing to show"
-    int textColor = -1;
-    int flashKey = -1;     // stun flash (0..), edge glow (1000..) or nothing (-1)
-    float edgeLevel = 0;   // edge glow, 0..1: how lined up the hands are (smoothed)
+    float edgeLevel = 0;  // edge glow, 0..1: how lined up the hands are (smoothed)
     double edgeAt = -1;
-    int thrustKey[2] = {-2, -2};
-    int glowKey[Settings::kRings] = {-2, -2, -2, -2, -2};
-    int passKey = -1;  // the key for "nothing shown" (the canvas starts clear)
     QuadLayer quads[12];
+    double frameUs = 0, frameMaxUs = 0, statsAt = -1;  // our part of each frame, for the log
+    unsigned frames = 0;
+    int errorBudget = 10;
 } ov;
 
+// ---- the draw thread ----
+struct Painter {
+    HANDLE thread = nullptr, wake = nullptr;
+    std::mutex lock;
+    DrawJob pending;  // the newest job only: what the render thread wanted last
+    bool hasPending = false;
+    std::atomic<uint64_t> drawn{0};
+    std::atomic<unsigned> pictures{0};
+    std::atomic<long long> busyUs{0};
+    Canvas canvas;
+    std::vector<uint8_t> bytes;
+    DrawJob last;
+    bool first = true;
+    double lastDrawAt = -1;
+} painter;
+
+void post(const DrawJob& job) {
+    {
+        std::lock_guard<std::mutex> g(painter.lock);
+        painter.pending = job;
+        painter.hasPending = true;
+    }
+    SetEvent(painter.wake);
+}
+
+// Paints what changed since the last job into the canvas. True if anything did.
+bool paint(const DrawJob& job) {
+    Canvas& cv = painter.canvas;
+    const DrawJob& last = painter.last;
+    bool all = painter.first || job.generation != last.generation, any = false;
+    if (all || job.flashKey != last.flashKey) {
+        if (job.flashKey >= 1000) drawEdgeGlow(cv, kFlashRect, job.hud, job.edge, job.edge);
+        else drawFlash(cv, kFlashRect, job.flashGreen ? kGreen : kRed, job.flashKey < 0 ? 0 : job.flashAlpha);
+        any = true;
+    }
+    for (int side = 0; side < 2; side++) {
+        if (all || job.gaugeKey[side] != last.gaugeKey[side]) {
+            if (job.gaugeKey[side] == -2) cv.clear(kGaugeRect[side]);
+            else drawGauge(cv, kGaugeRect[side], job.gaugeFill[side], job.gaugePulse[side]);
+            any = true;
+        }
+        if (all || job.thrustKey[side] != last.thrustKey[side]) {
+            if (job.thrustKey[side] == -2) cv.clear(kThrustRect[side]);
+            else drawThrusterCell(cv, kThrustRect[side], side, job.score[side], job.thrustOn[side], job.hud, job.icons, job.talk, job.bars, job.rings);
+            any = true;
+        }
+    }
+    for (int k = 0; k < Settings::kRings; k++)
+        if (all || job.glowKey[k] != last.glowKey[k]) {
+            if (job.glowKey[k] == -2) cv.clear(kGlowRect[k]);
+            else drawRingCell(cv, kGlowRect[k], job.glowFill[k], job.hud, job.glowAt[k], &digitFont);
+            any = true;
+        }
+    if (all || !sameText(job, last)) {
+        drawSpeeds(cv, kTextRect, job.current, job.last, job.hud, &digitFont, job.currentSize, job.lastSize, job.peak);
+        any = true;
+    }
+    if (all || job.passKey != last.passKey) {
+        drawPassCounter(cv, kPassRect, job.passNumber, job.passPlus, job.passColor, job.passAlpha, &digitFont);
+        any = true;
+    }
+    painter.last = job;
+    painter.first = false;
+    return any;
+}
+
+DWORD WINAPI drawThread(LPVOID) {
+    for (;;) {
+        WaitForSingleObject(painter.wake, 250);
+        DrawJob job;
+        bool have = false;
+        {
+            std::lock_guard<std::mutex> g(painter.lock);
+            if (painter.hasPending) { job = painter.pending; painter.hasPending = false; have = true; }
+        }
+        if (!have) continue;
+        double wait = painter.lastDrawAt >= 0 ? painter.lastDrawAt + 1.0 / std::max(job.maxFps, 1.f) - now() : 0;
+        if (wait > 0.0005) {  // no more than max_fps pictures a second: wait, then take the newest job
+            Sleep(DWORD(wait * 1000 + 0.5));
+            std::lock_guard<std::mutex> g(painter.lock);
+            if (painter.hasPending) { job = painter.pending; painter.hasPending = false; }
+        }
+        double t0 = now();
+        painter.lastDrawAt = t0;
+        if (paint(job)) {
+            painter.canvas.encode(painter.bytes);
+            int slot = ov.uploader.acquire(1000);
+            if (slot >= 0) {
+                ov.uploader.fill(slot, painter.bytes.data());
+                ov.uploader.publish(slot);
+                painter.pictures++;
+            } else if (ov.errorBudget > 0) {
+                ov.errorBudget--;
+                logf("draw thread: the GPU is still reading every staging buffer; picture skipped");
+            }
+        }
+        painter.busyUs += (long long)((now() - t0) * 1e6);
+        painter.drawn = job.serial;
+    }
+}
+
+// ---- the render thread's side ----
 ovrResult __cdecl hookedCreate(Session session, IUnknown* d3d, const SwapChainDesc* desc, SwapChain* out) {
     ID3D12CommandQueue* queue = nullptr;
     if (!gameQueue && d3d && SUCCEEDED(d3d->QueryInterface(IID_PPV_ARGS(&queue)))) {
@@ -426,19 +572,6 @@ ovrResult __cdecl hookedCreate(Session session, IUnknown* d3d, const SwapChainDe
         logf("captured the game's D3D12 queue (%dx%d swap chain)", desc ? desc->width : 0, desc ? desc->height : 0);
     }
     return realCreate(session, d3d, desc, out);
-}
-
-bool upload(Session session) {
-    int index = 0;
-    if (getCurrentIndex(session, ov.chain, &index) < 0 || index < 0 || index >= int(ov.buffers.size())) return false;
-    ov.canvas.encode(ov.bytes);
-    if (const char* error = ov.uploader.write(ov.buffers[index], ov.bytes.data())) {
-        logf("overlay upload: %s", error);
-        return false;
-    }
-    if (commit(session, ov.chain) < 0) return false;
-    ov.dirty = false;
-    return true;
 }
 
 void prepare(Session session, const void* const* layers, unsigned count) {
@@ -455,27 +588,61 @@ void prepare(Session session, const void* const* layers, unsigned count) {
         if (r < 0 || !texture) { logf("ovr_GetTextureSwapChainBufferDX(%d) failed (%d); overlay off", i, r); return; }
         ov.buffers.push_back(texture);  // kept for the process lifetime
     }
-    if (const char* error = ov.uploader.init(gameQueue, ov.buffers[0]->GetDesc())) { logf("uploader: %s; overlay off", error); return; }
-    if (!upload(session)) { logf("first overlay upload failed; overlay off"); return; }
+    if (const char* error = ov.uploader.init(gameQueue, ov.buffers)) { logf("uploader: %s; overlay off", error); return; }
+    std::vector<uint8_t> clear(size_t(kTexW) * kTexH * 4, 0);  // the first picture: nothing
+    int index = 0;
+    if (getCurrentIndex(session, ov.chain, &index) < 0 || index < 0 || index >= length) { logf("swap chain index %d; overlay off", index); return; }
+    if (const char* error = ov.uploader.write(index, clear.data())) { logf("first overlay upload failed (%s); overlay off", error); return; }
+    if (commit(session, ov.chain) < 0) { logf("first commit failed; overlay off"); return; }
+    if (!painter.thread) {
+        painter.wake = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+        painter.thread = painter.wake ? CreateThread(nullptr, 0, drawThread, nullptr, 0, nullptr) : nullptr;
+        if (!painter.thread) { logf("draw thread failed (%lu); overlay off", GetLastError()); return; }
+        SetThreadPriority(painter.thread, THREAD_PRIORITY_BELOW_NORMAL);  // never ahead of Echo's own threads
+    }
     headerSize = detectHeaderSize(layers, count);
     mode = Mode::Ready;
-    logf("overlay ready: %d buffers, layer header %zu bytes, game submits %u layers", length, headerSize, count);
+    logf("overlay ready: %d buffers, layer header %zu bytes, game submits %u layers; painting on its own thread, at most %.0f pictures/s",
+         length, headerSize, count, settings.maxFps);
 }
 
-// Redraws whatever changed since last frame and returns the quads to show.
-unsigned refresh(Session session, const QuadLayer** out) {
-    State s;
-    {
-        std::lock_guard<std::mutex> g(stateLock);
-        s = state;
-    }
-    double t = now();
-    bool fresh = s.localAt >= 0 && t - s.localAt < 0.5;
-    unsigned n = 0;
+// The game state the picture is built from, copied out under the lock (no allocations).
+struct Snapshot {
+    game::Local local;
+    double localAt = -1;
+    float trackerShown = NAN;
+    bool voicePressed = false;
+    double voiceAt = -1;
+    Flash flash;
+    float peak = -1;
+    PassView pass;
+    int apiTeam = -1;
+};
 
+Snapshot snapshot(double t) {
+    Snapshot s;
+    std::lock_guard<std::mutex> g(stateLock);
+    s.local = state.local;
+    s.localAt = state.localAt;
+    s.trackerShown = state.tracker.shown;
+    s.voicePressed = state.voicePressed;
+    s.voiceAt = state.voiceAt;
+    s.flash = state.flash;
+    if (settings.peakBadge) s.peak = state.peak.max(t, settings.peakSeconds);
+    if (settings.passes) s.pass = passView(state.passes, t, settings.passCountFrom);
+    s.apiTeam = state.apiTeam;
+    return s;
+}
+
+// What the picture should show now: keys that say which cells changed, and their contents.
+DrawJob buildJob(const Snapshot& s, double t) {
+    DrawJob job;
+    job.generation = ov.generation;
+    job.maxFps = settings.maxFps;
+    bool fresh = s.localAt >= 0 && t - s.localAt < 0.5;
     int team = s.local.netOk ? s.local.team : kTeamNone;
-    Color hud = teamColor(settings, team);
-    int colorKey = team == kTeamBlue ? 1 : team == kTeamOrange ? 2 : 0;
+    job.hud = teamColor(settings, team);
+    job.colorKey = team == kTeamBlue ? 1 : team == kTeamOrange ? 2 : 0;
 
     // wrist thrusters, scored up front: a good push also lights up the edges of the view
     const bool showThrusters = settings.thrusters && fresh;
@@ -500,21 +667,12 @@ unsigned refresh(Session session, const QuadLayer** out) {
 
     // stun flash, else the edge glow (drawn first so everything else sits on top of it)
     float alpha = settings.stun ? flashAlpha(s.flash, t, settings.flashStrength) : 0;
-    int flashKey = alpha > 0 ? int(alpha * 96) * 2 + (s.flash.green ? 1 : 0) : -1;
-    if (flashKey < 0 && edgeStep > 0) flashKey = 1000 + edgeStep * 4 + colorKey;
-    if (flashKey != ov.flashKey) {
-        if (flashKey >= 1000)
-            drawEdgeGlow(ov.canvas, kFlashRect, hud, edgeStep / 48.f, edgeStep / 48.f);
-        else
-            drawFlash(ov.canvas, kFlashRect, s.flash.green ? kGreen : kRed, flashKey < 0 ? 0 : float(flashKey / 2) / 96);
-        ov.flashKey = flashKey;
-        ov.dirty = true;
-    }
-    if (flashKey >= 0) {
-        Placement p = flashPlacement();
-        buildQuad(ov.quads[n], headerSize, ov.chain, kFlashRect, p.x, p.y, p.z, p.w, p.h);
-        out[n] = &ov.quads[n];
-        n++;
+    job.flashKey = alpha > 0 ? int(alpha * 96) * 2 + (s.flash.green ? 1 : 0) : -1;
+    job.flashGreen = s.flash.green;
+    job.flashAlpha = alpha > 0 ? float(int(alpha * 96)) / 96 : 0;
+    if (job.flashKey < 0 && edgeStep > 0) {
+        job.flashKey = 1000 + edgeStep * 4 + job.colorKey;
+        job.edge = edgeStep / 48.f;
     }
 
     // boost gauges
@@ -523,113 +681,134 @@ unsigned refresh(Session session, const QuadLayer** out) {
     for (int side = 0; side < 2; side++) {
         int k = settings.swapSides ? 1 - side : side;
         if (charges == 1) k = side == 1 ? 0 : 9;  // a single charge goes on the right
-        if (k >= charges) { ov.gaugeKey[side] = -2; continue; }
+        if (k >= charges) { job.gaugeKey[side] = -2; continue; }
         float fill = chargeFill(b, k);
         if (fill >= 1 && ov.lastFill[side] < 1) ov.readyAt[side] = t;
         ov.lastFill[side] = fill;
         float pulse = ov.readyAt[side] >= 0 ? clamp01(1 - float(t - ov.readyAt[side]) / 0.4f) : 0;
-        int key = fill >= 1 ? 1000 + int(pulse * 24) : int(fill * 240);
-        if (key != ov.gaugeKey[side]) {
-            drawGauge(ov.canvas, kGaugeRect[side], fill, pulse);
-            ov.gaugeKey[side] = key;
-            ov.dirty = true;
-        }
-        Placement p = gaugePlacement(settings, side);
-        buildQuad(ov.quads[n], headerSize, ov.chain, kGaugeRect[side], p.x, p.y, p.z, p.w, p.h);
-        out[n] = &ov.quads[n];
-        n++;
+        job.gaugeKey[side] = fill >= 1 ? 1000 + int(pulse * 24) : int(fill * 240);
+        job.gaugeFill[side] = fill;
+        job.gaugePulse[side] = pulse;
     }
 
     // wrist thruster gauges in the HUD colour, the mute icon in the left ring and the
     // connection bars in the right one (rings=0: just the icons)
     if (showThrusters && (settings.rings || settings.icons)) {
-        int bars = pingBars(s.local.ping, settings.pingBars);
+        job.bars = pingBars(s.local.ping, settings.pingBars);
         bool pressedKnown = s.voiceAt >= 0 && t - s.voiceAt < 0.5;
-        bool talk = talking(s.local.muted, s.local.voiceMode, pressedKnown && s.voicePressed);
+        job.talk = talking(s.local.muted, s.local.voiceMode, pressedKnown && s.voicePressed);
+        job.icons = settings.icons;
+        job.rings = settings.rings;
         for (int side = 0; side < 2; side++) {
             int h = settings.swapHands ? 1 - side : side;
-            int icon = !settings.icons ? 0 : side == 0 ? 1 + int(talk) : 10 + bars;
+            int icon = !settings.icons ? 0 : side == 0 ? 1 + int(job.talk) : 10 + job.bars;
             int gauge = settings.rings && th.on[h] ? int(score[h] * 120) + 1 : 0;
-            int key = (gauge * 16 + icon) * 4 + colorKey;
-            if (key != ov.thrustKey[side]) {
-                drawThrusterCell(ov.canvas, kThrustRect[side], side, score[h], th.on[h], hud, settings.icons, talk, bars, settings.rings);
-                ov.thrustKey[side] = key;
-                ov.dirty = true;
-            }
-            Placement p = thrusterPlacement(settings, side);
-            buildQuad(ov.quads[n], headerSize, ov.chain, kThrustRect[side], p.x, p.y, p.z, p.w, p.h);
-            out[n] = &ov.quads[n];
-            n++;
+            job.thrustKey[side] = (gauge * 16 + icon) * 4 + job.colorKey;
+            job.score[side] = score[h];
+            job.thrustOn[side] = th.on[h];
         }
-    } else {
-        ov.thrustKey[0] = ov.thrustKey[1] = -2;
     }
 
     // speed rings: each fills from the previous ring's speed to its own, lit up at it
     for (int k = 0; k < Settings::kRings; k++) {
-        if (!(settings.glow && fresh && s.local.speedOk)) { ov.glowKey[k] = -2; continue; }
+        if (!(settings.glow && fresh && s.local.speedOk)) { job.glowKey[k] = -2; continue; }
         float fill = glowFill(settings, k, s.local.speed);
-        int key = (fill >= 1 ? 200 : int(fill * 120)) * 4 + colorKey;
-        if (key != ov.glowKey[k]) {
-            drawRingCell(ov.canvas, kGlowRect[k], fill, hud, settings.glowAt[k], &digitFont);
-            ov.glowKey[k] = key;
-            ov.dirty = true;
-        }
-        Placement p = glowPlacement(settings, k);
-        buildQuad(ov.quads[n], headerSize, ov.chain, kGlowRect[k], p.x, p.y, p.z, p.w, p.h);
-        out[n] = &ov.quads[n];
-        n++;
+        job.glowKey[k] = (fill >= 1 ? 200 : int(fill * 120)) * 4 + job.colorKey;
+        job.glowFill[k] = fill;
+        job.glowAt[k] = settings.glowAt[k];
     }
 
     // speeds: current on top, the last run's top speed under it
-    char current[16] = "", last[16] = "";
     if (settings.speed && fresh && s.local.speedOk) {
-        formatSpeed(s.local.speed, current, sizeof current);
-        formatSpeed(s.tracker.shown, last, sizeof last);
+        formatSpeed(s.local.speed, job.current, sizeof job.current);
+        formatSpeed(s.trackerShown, job.last, sizeof job.last);
     }
-    char peak[16] = "";
-    if (settings.peakBadge && current[0]) {
-        float top = s.peak.max(t, settings.peakSeconds);
-        formatSpeed(top >= 0 ? top : s.local.speed, peak, sizeof peak);
-    }
-    std::string textKey = std::string(current) + "|" + last + "|" + peak;
-    if (ov.text != textKey || (current[0] && ov.textColor != colorKey)) {
-        float scale = kTextRect.h / settings.trackerPx;  // texture px per readout px
-        drawSpeeds(ov.canvas, kTextRect, current, last, hud, &digitFont, settings.currentFontPx * scale, settings.fontPx * scale, peak);
-        ov.text = textKey;
-        ov.textColor = colorKey;
-        ov.dirty = true;
-    }
-    if (current[0]) {
-        Placement p = trackerPlacement(settings);
-        buildQuad(ov.quads[n], headerSize, ov.chain, kTextRect, p.x, p.y, p.z, p.w, p.h);
-        out[n] = &ov.quads[n];
-        n++;
-    }
+    if (settings.peakBadge && job.current[0]) formatSpeed(s.peak >= 0 ? s.peak : s.local.speed, job.peak, sizeof job.peak);
+    float scale = kTextRect.h / settings.trackerPx;  // texture px per readout px
+    job.currentSize = settings.currentFontPx * scale;
+    job.lastSize = settings.fontPx * scale;
 
     // pass counter at the top, in the colour of the team with the chain
     passesWanted = settings.passes;
-    PassView pv = settings.passes ? passView(s.passes, t, settings.passCountFrom) : PassView{};
+    PassView pv = s.pass;
     if (settings.passesMine && pv.team != s.apiTeam) pv = PassView{};
-    int passKey = -1;
     if (pv.kind != PassView::None) {
         int teamKey = pv.team == kTeamBlue ? 1 : pv.team == kTeamOrange ? 2 : 0;
-        passKey = ((pv.number * 2 + (pv.kind == PassView::Plus)) * 32 + int(pv.alpha * 24 + .5f)) * 4 + teamKey;
+        job.passKey = ((pv.number * 2 + (pv.kind == PassView::Plus)) * 32 + int(pv.alpha * 24 + .5f)) * 4 + teamKey;
+        job.passNumber = pv.number;
+        job.passPlus = pv.kind == PassView::Plus;
+        job.passColor = teamColor(settings, pv.team);
+        job.passAlpha = pv.alpha;
+        job.passScale = pv.scale;
     }
-    if (passKey != ov.passKey) {
-        drawPassCounter(ov.canvas, kPassRect, pv.number, pv.kind == PassView::Plus, teamColor(settings, pv.team), pv.alpha, &digitFont);
-        ov.passKey = passKey;
-        ov.dirty = true;
+    return job;
+}
+
+// A finished picture, if the draw thread has one: one command list and a commit.
+void showReady(Session session) {
+    int slot = ov.uploader.takeReady();
+    if (slot < 0) return;
+    int index = -1;
+    if (getCurrentIndex(session, ov.chain, &index) < 0 || index < 0 || index >= int(ov.buffers.size())) {
+        ov.uploader.discard(slot);
+        return;
     }
-    if (passKey >= 0) {
-        Placement p = passPlacement(settings, pv.scale);
-        buildQuad(ov.quads[n], headerSize, ov.chain, kPassRect, p.x, p.y, p.z, p.w, p.h);
+    if (const char* error = ov.uploader.submit(slot, index)) {
+        if (ov.errorBudget > 0) { ov.errorBudget--; logf("overlay upload: %s", error); }
+        return;
+    }
+    if (commit(session, ov.chain) < 0 && ov.errorBudget > 0) { ov.errorBudget--; logf("overlay commit failed"); }
+}
+
+// The quads to show for a job, bottom layer first.
+unsigned layout(const DrawJob& job, const QuadLayer** out) {
+    unsigned n = 0;
+    auto add = [&](const Rect& r, Placement p) {
+        buildQuad(ov.quads[n], headerSize, ov.chain, r, p.x, p.y, p.z, p.w, p.h);
         out[n] = &ov.quads[n];
         n++;
-    }
-
-    if (ov.dirty) upload(session);  // on failure the previous image stays up and it retries next frame
+    };
+    if (job.flashKey >= 0) add(kFlashRect, flashPlacement());
+    for (int side = 0; side < 2; side++)
+        if (job.gaugeKey[side] != -2) add(kGaugeRect[side], gaugePlacement(settings, side));
+    for (int side = 0; side < 2; side++)
+        if (job.thrustKey[side] != -2) add(kThrustRect[side], thrusterPlacement(settings, side));
+    for (int k = 0; k < Settings::kRings; k++)
+        if (job.glowKey[k] != -2) add(kGlowRect[k], glowPlacement(settings, k));
+    if (job.current[0]) add(kTextRect, trackerPlacement(settings));
+    if (job.passKey >= 0) add(kPassRect, passPlacement(settings, job.passScale));
     return n;
+}
+
+// Every frame: what to show (to the draw thread if it changed), a finished picture if there
+// is one, and the quads.
+unsigned refresh(Session session, const QuadLayer** out) {
+    double t = now();
+    DrawJob job = buildJob(snapshot(t), t);
+    if (differs(job, ov.lastJob)) {
+        job.serial = ++ov.serial;
+        ov.lastJob = job;
+        post(job);
+    }
+    showReady(session);
+    return layout(ov.lastJob, out);
+}
+
+// Our part of each frame, summed up in the log once a minute.
+void account(double t0) {
+    double t = now(), us = (t - t0) * 1e6;
+    ov.frameUs += us;
+    ov.frames++;
+    if (us > ov.frameMaxUs) ov.frameMaxUs = us;
+    if (ov.statsAt < 0) ov.statsAt = t;
+    if (t - ov.statsAt < 60) return;
+    unsigned pictures = painter.pictures.exchange(0);
+    long long busy = painter.busyUs.exchange(0);
+    logf("last %.0f s: %u frames, HUD %.0f us avg / %.0f us max on Echo's render thread; %u pictures painted (%.0f us each, draw thread)",
+         t - ov.statsAt, ov.frames, ov.frameUs / std::max(1u, ov.frames), ov.frameMaxUs, pictures, pictures ? double(busy) / pictures : 0.0);
+    ov.frameUs = ov.frameMaxUs = 0;
+    ov.frames = 0;
+    ov.statsAt = t;
 }
 
 // ---- settings.ini, watched while Echo runs ----
@@ -653,13 +832,7 @@ void watchSettings() {
     if (CompareFileTime(&stamp, &settingsStamp) == 0) return;
     settingsStamp = stamp;
     readSettings(settingsPath);
-    ov.gaugeKey[0] = ov.gaugeKey[1] = ov.thrustKey[0] = ov.thrustKey[1] = -3;  // never a real key: redraw
-    for (int& k : ov.glowKey) k = -3;
-    ov.text = "\x01";
-    ov.textColor = -1;
-    ov.flashKey = -3;
-    ov.passKey = -3;
-    ov.dirty = true;
+    ov.generation++;  // the next job differs from anything before: everything is repainted
     logf("settings.ini changed: reloaded (HUD %s)", enabled ? "on" : "off");
 }
 
@@ -679,8 +852,10 @@ ovrResult submit(SubmitFn real, Session session, long long frame, const void* sc
     SubmitGuard guard;
     if (mode == Mode::Waiting) prepare(session, layers, count);
     if (mode != Mode::Ready) return real(session, frame, scale, layers, count);
+    double t0 = now();
     const QuadLayer* extra[12];
     unsigned n = refresh(session, extra);
+    account(t0);
     if (n == 0) return real(session, frame, scale, layers, count);
     const void* list[5 + 12];
     for (unsigned i = 0; i < count; i++) list[i] = layers[i];
@@ -782,6 +957,7 @@ void readSettings(const std::wstring& ini) {
     s.stun = b(L"stun", L"enabled", s.stun);
     s.shieldGrace = f(L"stun", L"shield_grace_ms", s.shieldGrace * 1000, 0.f, 2000.f) / 1000;
     s.flashStrength = f(L"stun", L"strength", s.flashStrength, 0.05f, 1.f);
+    s.maxFps = f(L"general", L"max_fps", s.maxFps, 5.f, 240.f);
     s.passes = b(L"passes", L"enabled", s.passes);
     GetPrivateProfileStringW(L"passes", L"teams", L"both", buf, 64, ini.c_str());
     s.passesMine = _wcsicmp(buf, L"mine") == 0;
@@ -861,6 +1037,23 @@ extern "C" __declspec(dllexport) void hudplus_test_stun(void* punchableSystem, u
     observeStun(punchableSystem, id, seconds);
 }
 extern "C" __declspec(dllexport) void hudplus_test_api_port(int port) { apiPort = port; }
+// Our part of the frames so far: average and worst microseconds on the render thread, and
+// the average per picture on the draw thread.
+extern "C" __declspec(dllexport) void hudplus_test_stats(double* avgUs, double* maxUs, double* paintUs) {
+    *avgUs = ov.frames ? ov.frameUs / ov.frames : 0;
+    *maxUs = ov.frameMaxUs;
+    unsigned pictures = painter.pictures.load();
+    *paintUs = pictures ? double(painter.busyUs.load()) / pictures : 0;
+}
+// Waits until the draw thread has painted the newest job (the next submit shows it).
+extern "C" __declspec(dllexport) int hudplus_test_wait_drawn(int timeoutMs) {
+    ULONGLONG until = GetTickCount64() + timeoutMs;
+    while (painter.drawn < ov.serial) {
+        if (GetTickCount64() > until) return 0;
+        Sleep(1);
+    }
+    return 1;
+}
 #endif
 
 // EchoLoader calls PluginInit only for entries with "args"; DllMain covers the rest.

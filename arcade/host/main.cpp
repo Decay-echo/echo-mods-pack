@@ -49,11 +49,14 @@ const Rect KEY_DEL{12, 456, 212, 524}, KEY_SPACE{216, 456, 612, 524}, KEY_CLEAR{
 constexpr size_t QUERY_MAX = 80;
 
 Rect grow(Rect r, int by) { return {r.x0 - by, r.y0 - by, r.x1 + by, r.y1 + by}; }
-// YouTube on this PC: a toolbar on top, the web page under it (touch it like a tablet).
+// YouTube on this PC: the web page (touch it like a tablet), with a toolbar on top while
+// the small button at the top-right has it shown. Videos (mpv) keep their controls away the
+// same way: the picture gets the whole tablet until you ask.
 constexpr int TOOL_BUTTONS = 7;
 const wchar_t* const TOOL_LABELS[TOOL_BUTTONS] = {L"\x25C0 BACK", L"HOME", L"SEARCH", L"PREV", L"PAUSE", L"NEXT", L"CLOSE"};
-Rect toolButton(int i) { return {6 + i * 146, 4, 6 + i * 146 + 140, 54}; }
-const Rect PAGE_AREA{0, 58, SCREEN_W, SCREEN_H};
+Rect toolButton(int i) { return {6 + i * 136, 4, 6 + i * 136 + 130, 54}; }
+const Rect PAGE_AREA{0, 58, SCREEN_W, SCREEN_H};        // under the toolbar
+const Rect CONTROLS_BUTTON{962, 6, 1016, 56};           // the small button: controls / toolbar on and off
 constexpr int TAP_SLOP = 28;          // tablet pixels a finger may drift and still be a tap
 constexpr uint64_t TAP_WAIT_MS = 110;  // a lift this short followed by a touch nearby is one slide
 Rect keyRect(int row, int col) { return {12 + col * 100, 170 + row * 70, 12 + col * 100 + 96, 170 + row * 70 + 64}; }
@@ -222,7 +225,7 @@ private:
         if (!session_.launch(current_.id, target, start)) { message_ = L"Could not start mpv (see host.log)."; return; }
         playing_ = title;
         mode_ = Mode::Running;
-        controlsUntil_ = GetTickCount64() + 4000;
+        controlsUntil_ = 0;
         resetInput();
     }
 
@@ -404,7 +407,7 @@ private:
         if (!session_.launch(AppId::YouTube, L"", 0, urls, index)) { message_ = L"Could not start mpv (see host.log)."; return; }
         playing_ = title;
         mode_ = Mode::Running;
-        controlsUntil_ = GetTickCount64() + 4000;
+        controlsUntil_ = 0;
         resetInput();
     }
     // ---- YouTube on this PC: the browser window, captured, used like YouTube on a tablet.
@@ -538,10 +541,27 @@ private:
             case 6: closeScreen(); break;
         }
     }
+    bool toolbarShown() const { return toolbar_; }
+    Rect pageArea() const { return toolbar_ ? PAGE_AREA : Rect{0, 0, SCREEN_W, SCREEN_H}; }
+    // The small button at the top-right: dim while the controls are away, lit while they're up.
+    void controlsButton(bool on, bool paused = false) {
+        canvas_.blend(CONTROLS_BUTTON, rgb(0, 0, 0), on ? 60 : 120);
+        canvas_.frame(CONTROLS_BUTTON, on ? rgb(235, 235, 240) : rgb(120, 126, 150), 2);
+        canvas_.text(CONTROLS_BUTTON, L"\x2261", 30, on ? rgb(255, 255, 255) : rgb(205, 210, 225));
+        if (paused) {
+            Rect mark{CONTROLS_BUTTON.x0 - 58, CONTROLS_BUTTON.y0, CONTROLS_BUTTON.x0 - 6, CONTROLS_BUTTON.y1};
+            canvas_.blend(mark, rgb(0, 0, 0), 120);
+            canvas_.text(mark, L"II", 24, rgb(235, 235, 240));
+        }
+    }
     void screenTouch(const Touch& t) {
-        for (int i = 0; i < TOOL_BUTTONS; i++)
-            if (tapped(t, 800 + i, toolButton(i))) { toolPressed(i); return; }
-        if (t.y < PAGE_AREA.y0) { if (!t.down) pressed_ = -1; return; }
+        if (tapped(t, 810, CONTROLS_BUTTON)) { toolbar_ = !toolbar_; return; }
+        if (CONTROLS_BUTTON.contains(t.x, t.y)) return;
+        if (toolbar_) {
+            for (int i = 0; i < TOOL_BUTTONS; i++)
+                if (tapped(t, 800 + i, toolButton(i))) { toolPressed(i); return; }
+            if (t.y < PAGE_AREA.y0) { if (!t.down) pressed_ = -1; return; }
+        }
         pageGesture(t);
     }
     // One finger on the page: a tap clicks there; a slide scrolls the page with the finger.
@@ -571,7 +591,7 @@ private:
             return;
         }
         for (auto& [cell, h] : held_)
-            if (PAGE_AREA.contains(h.x, h.y)) return;  // another cell of the same finger is still down
+            if (pageArea().contains(h.x, h.y)) return;  // another cell of the same finger is still down
         if (!fingerDown_) return;
         fingerDown_ = false;
         if (!scrolled_) tapAt_ = now + TAP_WAIT_MS;
@@ -1318,9 +1338,11 @@ private:
 
     void playerTouch(const Touch& t) {
         uint64_t now = GetTickCount64();
-        bool shown = now < controlsUntil_ || session_.mpv().paused();  // paused: controls stay up
-        if (!shown) { if (!t.down) controlsUntil_ = now + 5000; return; }  // first tap just reveals the controls
-        controlsUntil_ = now + 5000;
+        bool shown = now < controlsUntil_;
+        if (tapped(t, 320, CONTROLS_BUTTON)) { controlsUntil_ = shown ? 0 : now + 8000; return; }  // the small button only
+        if (CONTROLS_BUTTON.contains(t.x, t.y)) return;
+        if (!shown) { if (!t.down) pressed_ = -1; return; }
+        controlsUntil_ = now + 8000;
         auto& mpv = session_.mpv();
         bool youTube = current_.id == AppId::YouTube;  // PREV / NEXT instead of SUBS / AUDIO
         if (!t.down && SEEK_BAR.contains(t.x, t.y) && pressed_ < 0) {
@@ -1531,21 +1553,25 @@ private:
                 ch = std::clamp(int((docRect_.bottom - docRect_.top) * sy), 1, scrH_ - cy);
             }
             cropX_ = cx; cropY_ = cy; cropW_ = cw; cropH_ = ch;
-            float scale = std::min(float(PAGE_AREA.w()) / cw, float(PAGE_AREA.h()) / ch);
+            Rect area = pageArea();
+            float scale = std::min(float(area.w()) / cw, float(area.h()) / ch);
             int w = int(cw * scale), h = int(ch * scale);
-            pageShown_ = {PAGE_AREA.x0 + (PAGE_AREA.w() - w) / 2, PAGE_AREA.y0 + (PAGE_AREA.h() - h) / 2, 0, 0};
+            pageShown_ = {area.x0 + (area.w() - w) / 2, area.y0 + (area.h() - h) / 2, 0, 0};
             pageShown_.x1 = pageShown_.x0 + w;
             pageShown_.y1 = pageShown_.y0 + h;
-            canvas_.blit(screenPixels_.data() + (size_t(cy) * scrW_ + cx) * 4, cw, ch, scrW_ * 4, PAGE_AREA);
+            canvas_.blit(screenPixels_.data() + (size_t(cy) * scrW_ + cx) * 4, cw, ch, scrW_ * 4, area);
         } else {
             canvas_.text({0, 220, SCREEN_W, 280}, L"Waiting for the YouTube window...", 32, rgb(230, 230, 235));
             canvas_.text({0, 290, SCREEN_W, 330}, L"It must stay open on the PC (not minimized).", 22, rgb(160, 170, 190), false);
         }
-        canvas_.fill({0, 0, SCREEN_W, PAGE_AREA.y0}, rgb(24, 24, 28));
-        for (int i = 0; i < TOOL_BUTTONS; i++) {
-            std::wstring label = i == 4 ? (media_.valid && !media_.playing ? L"PLAY" : L"PAUSE") : TOOL_LABELS[i];
-            button(toolButton(i), label, pressed_ == 800 + i, i == 6 ? rgb(120, 40, 40) : i == 2 ? rgb(150, 30, 40) : rgb(44, 50, 72), 20);
+        if (toolbar_) {
+            canvas_.fill({0, 0, SCREEN_W, PAGE_AREA.y0}, rgb(24, 24, 28));
+            for (int i = 0; i < TOOL_BUTTONS; i++) {
+                std::wstring label = i == 4 ? (media_.valid && !media_.playing ? L"PLAY" : L"PAUSE") : TOOL_LABELS[i];
+                button(toolButton(i), label, pressed_ == 800 + i, i == 6 ? rgb(120, 40, 40) : i == 2 ? rgb(150, 30, 40) : rgb(44, 50, 72), 20);
+            }
         }
+        controlsButton(toolbar_);
         messageBar();
     }
 
@@ -1595,7 +1621,8 @@ private:
 
     void drawPlayerControls() {
         auto& mpv = session_.mpv();
-        if ((GetTickCount64() >= controlsUntil_ && !mpv.paused()) || mode_ != Mode::Running) return;
+        if (mode_ != Mode::Running) return;
+        if (GetTickCount64() >= controlsUntil_) { controlsButton(false, mpv.paused()); return; }
         bool youTube = current_.id == AppId::YouTube;
         std::wstring title = playing_;
         if (youTube) {
@@ -1606,7 +1633,8 @@ private:
             if (n > 1 && p >= 0) title = L"(" + std::to_wstring(p + 1) + L"/" + std::to_wstring(n) + L")   " + title;
         }
         canvas_.blend({0, 0, SCREEN_W, 64}, rgb(0, 0, 0), 170);
-        canvas_.text({20, 0, 1004, 64}, title, 24, rgb(255, 255, 255), true, 0);
+        canvas_.text({20, 0, 950, 64}, title, 24, rgb(255, 255, 255), true, 0);
+        controlsButton(true);
         canvas_.blend({0, 408, SCREEN_W, SCREEN_H}, rgb(0, 0, 0), 190);
         double pos = mpv.position(), dur = mpv.duration();
         canvas_.text({20, 410, 500, 446}, clock(pos) + L" / " + clock(dur), 20, rgb(230, 230, 235), false, 0);
@@ -1718,7 +1746,7 @@ private:
     Rect pageShown_{};                  // where the page picture is on the tablet
     int cropX_ = 0, cropY_ = 0, cropW_ = 0, cropH_ = 0;  // the page's part of the capture
     int fingerX0_ = 0, fingerY0_ = 0, fingerX_ = 0, fingerY_ = 0;
-    bool docBusy_ = false, fingerDown_ = false, scrolled_ = false, keyboardForScreen_ = false;
+    bool docBusy_ = false, fingerDown_ = false, scrolled_ = false, keyboardForScreen_ = false, toolbar_ = false;
     std::string linkPin_;
     uint64_t linkStarted_ = 0, lastLinkPoll_ = 0, controlsUntil_ = 0, lastTimeline_ = 0;
     PlexItem plexItem_;

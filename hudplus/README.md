@@ -76,6 +76,10 @@ All offsets are for echovr.exe build `0x6452dff6` (sha256 `b6d08277…`) and liv
 
 Handles are `u32 {index, generation}`. A component system's id map at `+0xC8` gives `{slot, generation}`, entries are at `+0xF8`, and 16-byte actor references at `+0x100`. These are the same checks as the game's own `IsValid`.
 
+## What it costs Echo
+
+Nothing that can drop a frame. Echo's render thread only builds a small note of what to show (a few keys, numbers and strings) and hands it over; a draw thread of its own (below-normal priority) paints the cells that changed, encodes the picture and copies it into a staging buffer, at most `max_fps` (60) times a second. Showing a finished picture back on the render thread is one command list recorded once per staging slot and swap-chain texture, plus the commit. Measured on the hook test: about 50 µs per frame on the render thread (it was 1.4 ms when the digits were rasterized there every frame), 0.7 ms per picture on the draw thread. The glyphs of Echo's font are rasterized once per size and cached. The log sums it up once a minute: `last 60 s: N frames, HUD x us avg / y us max on Echo's render thread; P pictures painted`.
+
 ## Drawing
 
 Everything is in one 512×256 texture (sRGB, premultiplied alpha) on a 3-buffer Oculus swap chain, made on the game's D3D12 queue. It's redrawn on the CPU and uploaded only when something changes. Each element is its own head-locked `ovrLayerQuad` with a viewport into that texture:

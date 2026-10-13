@@ -22,6 +22,8 @@ Only want one of them? `INSTALL.cmd --no-arcade` (HUD only) or `INSTALL.cmd --no
 
 ## Using it
 
+**Performance.** The HUD paints on a thread of its own and costs Echo's render thread about 50 microseconds a frame. If Echo stutters with the pack installed, look at `%LOCALAPPDATA%\EchoHudPlus\hudplus.log`: once a minute it says how long the HUD took.
+
 **Settings are on the tablet.** Open the hand tablet, press the arcade's **gear** tab: one page each for the tablet, the HUD, the screen effects and NORMAL. Every switch applies right away (hiding Echo's visor lines: from the next start). **NORMAL > ALL OFF** puts everything back to Echo's normal at once and **ALL BACK ON** undoes it; **NORMAL TABLET** (tap twice) also takes the arcade, HUD and HUD lines out when you close Echo VR, and `INSTALL.cmd` brings them back.
 
 **HUD.** It's at the bottom of your view, the pass counter at the top. The pass counter needs Echo's **Settings > Game > API access** on. Every setting (positions, sizes, colours, the glow) is also in `bin\win10\plugins\EchoHudPlus\settings.ini` in your Echo VR folder. Details: [hudplus/README.md](hudplus/README.md).
@@ -31,6 +33,7 @@ Only want one of them? `INSTALL.cmd --no-arcade` (HUD only) or `INSTALL.cmd --no
 - **Your games:** put ROMs you own in `arcade\apps\roms\<system>\` (the folder names are listed in `arcade\apps\roms\README.md`). They show up under RetroArch's **Playlists**.
 - **FREEZE** (top of the launcher): you're held still and your Touch controllers play RetroArch. Left stick = D-pad, right stick = analog, A/B/X/Y = face buttons, grips = L/R, triggers = L2/R2, left stick click = SELECT, right stick click = RetroArch menu, **menu button** = START. **Hold the menu button 1 second** to move again (the game pauses). It also switches off by itself when you change level.
 - **AUTO DOCK** (next to FREEZE) puts the arcade on the big lobby posters near you.
+- **Videos and YouTube** fill the whole tablet; the small **≡** at the top-right brings the controls or YouTube's toolbar back, and again puts them away.
 
 Details: [arcade/README.md](arcade/README.md).
 

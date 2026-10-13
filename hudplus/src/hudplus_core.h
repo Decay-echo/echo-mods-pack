@@ -8,10 +8,13 @@
 #include <windows.h>
 #include <d3d12.h>
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <map>
+#include <mutex>
 #include <vector>
 
 namespace hudplus {
@@ -70,6 +73,7 @@ struct Settings {
     bool stun = true;
     float shieldGrace = 0.2f;     // s: a shield dropped this recently still counts as up
     float flashStrength = 0.85f;  // peak opacity of the flash, 0..1
+    float maxFps = 60.f;          // the draw thread paints at most this often (the speed changes every frame)
     // pass counter at the top of the view (from Echo's API): +1 for each pass inside a team,
     // the count itself from passCountFrom passes, gone when the other team gets the disc;
     // a goal shows the chain 50% bigger, flashing
@@ -543,6 +547,7 @@ struct DigitFont {
     };
     bool ok = false;
     float pxRange = 4, em = 32;
+    unsigned id = 0;  // which font a cached glyph mask belongs to
     Glyph g[128];
 };
 
@@ -580,7 +585,59 @@ inline bool parseDigitFont(const uint8_t* d, size_t n, DigitFont& f) {
         if (!take(at, g.rgb.data(), g.rgb.size())) return false;
     }
     f.ok = count > 0 && f.em > 0 && f.pxRange > 0;
+    static std::atomic<unsigned> fonts{0};
+    f.id = ++fonts;
     return f.ok;
+}
+
+// One glyph rasterized at one size, kept for reuse: the speed changes every frame, and
+// rasterizing its distance-field glyphs each time was the HUD's biggest cost. Glyphs go
+// at whole-pixel positions (invisible at these sizes). The mask starts 1 px before the
+// glyph's left and top.
+struct GlyphMask {
+    int w = 0, h = 0;
+    std::vector<float> cov;
+};
+
+inline const GlyphMask& glyphMask(const DigitFont& f, unsigned char ch, float size) {
+    static std::mutex lock;
+    static std::map<unsigned long long, GlyphMask> cache;
+    unsigned long long key = (unsigned long long(f.id) << 40) | (unsigned long long(ch) << 32) | (unsigned long long)(size * 64 + .5f);
+    std::lock_guard<std::mutex> guard(lock);
+    auto it = cache.find(key);
+    if (it != cache.end()) return it->second;
+    GlyphMask& m = cache[key];
+    const DigitFont::Glyph& g = f.g[ch];
+    const float k = size / f.em;
+    if (g.w < 2 || g.h < 2 || !(k > 0)) return m;
+    m.w = int(g.w * k) + 3;
+    m.h = int(g.h * k) + 3;
+    m.cov.assign(size_t(m.w) * m.h, 0.f);
+    const float left = 1, top = 1;
+    // Outside the glyph's box counts as far outside (0), so its edge texels don't get
+    // stretched into little ticks beside the digit.
+    auto texel = [&](int xx, int yy, int c) {
+        return xx < 0 || yy < 0 || xx >= g.w || yy >= g.h ? 0.f : g.rgb[(size_t(yy) * g.w + xx) * 3 + c] / 255.f;
+    };
+    for (int y = 0; y < m.h; y++)
+        for (int x = 0; x < m.w; x++) {
+            float u = (x + .5f - left) / k - .5f, v = (y + .5f - top) / k - .5f;
+            if (u < -1 || v < -1 || u > g.w || v > g.h) continue;
+            int iu = int(std::floor(u)), iv = int(std::floor(v));
+            // Interpolate each texel's median rather than the three channels: the corners
+            // round off a little, but the font's channel clashes (notches and cuts that
+            // show when it's drawn this large) go away.
+            float fu = u - iu, fv = v - iv;
+            auto med3 = [&](int xx, int yy) {
+                float r0 = texel(xx, yy, 0), g0 = texel(xx, yy, 1), b0 = texel(xx, yy, 2);
+                return std::max(std::min(r0, g0), std::min(std::max(r0, g0), b0));
+            };
+            float a = med3(iu, iv) + (med3(iu + 1, iv) - med3(iu, iv)) * fu;
+            float b = med3(iu, iv + 1) + (med3(iu + 1, iv + 1) - med3(iu, iv + 1)) * fu;
+            float med = a + (b - a) * fv;
+            m.cov[size_t(y) * m.w + x] = clamp01((med - 0.5f) * f.pxRange * k + 0.5f);
+        }
+    return m;
 }
 
 // Coverage mask for digits and dots in Echo's font, `size` px (em) high, centred.
@@ -595,34 +652,21 @@ inline std::vector<float> msdfTextMask(const DigitFont& f, const char* s, int w,
         if ((unsigned char)*c >= 128) continue;
         const DigitFont::Glyph& g = f.g[(unsigned char)*c];
         if (g.w < 2 || g.h < 2) { pen += g.adv * k; continue; }
-        float left = pen + g.xo * k, top = base - g.yo * k;
-        int x0 = std::max(0, int(left) - 1), x1 = std::min(w, int(left + g.w * k) + 2);
-        int y0 = std::max(0, int(top) - 1), y1 = std::min(h, int(top + g.h * k) + 2);
-        // Outside the glyph's box counts as far outside (0), so its edge texels don't get
-        // stretched into little ticks beside the digit.
-        auto texel = [&](int xx, int yy, int ch) {
-            return xx < 0 || yy < 0 || xx >= g.w || yy >= g.h ? 0.f : g.rgb[(size_t(yy) * g.w + xx) * 3 + ch] / 255.f;
-        };
-        for (int y = y0; y < y1; y++)
-            for (int x = x0; x < x1; x++) {
-                float u = (x + .5f - left) / k - .5f, v = (y + .5f - top) / k - .5f;
-                if (u < -1 || v < -1 || u > g.w || v > g.h) continue;
-                int iu = int(std::floor(u)), iv = int(std::floor(v));
-                // Interpolate each texel's median rather than the three channels: the corners
-                // round off a little, but the font's channel clashes (notches and cuts that
-                // show when it's drawn this large) go away.
-                float fu = u - iu, fv = v - iv;
-                auto med3 = [&](int xx, int yy) {
-                    float r0 = texel(xx, yy, 0), g0 = texel(xx, yy, 1), b0 = texel(xx, yy, 2);
-                    return std::max(std::min(r0, g0), std::min(std::max(r0, g0), b0));
-                };
-                float a = med3(iu, iv) + (med3(iu + 1, iv) - med3(iu, iv)) * fu;
-                float b = med3(iu, iv + 1) + (med3(iu + 1, iv + 1) - med3(iu, iv + 1)) * fu;
-                float med = a + (b - a) * fv;
-                float cov = clamp01((med - 0.5f) * f.pxRange * k + 0.5f);
-                float& o = m[size_t(y) * w + x];
-                o = std::max(o, cov);
+        const GlyphMask& gm = glyphMask(f, (unsigned char)*c, size);
+        int x0 = int(std::lround(pen + g.xo * k)) - 1, y0 = int(std::lround(base - g.yo * k)) - 1;
+        for (int y = 0; y < gm.h; y++) {
+            int yy = y0 + y;
+            if (yy < 0 || yy >= h) continue;
+            for (int x = 0; x < gm.w; x++) {
+                int xx = x0 + x;
+                if (xx < 0 || xx >= w) continue;
+                float cov = gm.cov[size_t(y) * gm.w + x];
+                if (cov > 0) {
+                    float& o = m[size_t(yy) * w + xx];
+                    o = std::max(o, cov);
+                }
             }
+        }
         pen += g.adv * k;
     }
     return m;
@@ -918,21 +962,25 @@ struct ComRelease {
     ~ComRelease() { if (p) p->Release(); }
 };
 
-// Writes RGBA8 rows into textures that rest in PIXEL_SHADER_RESOURCE (Oculus swap-chain
-// textures do), on the game's DIRECT queue. A small ring of upload buffers and command
-// lists means no CPU wait in the normal case.
+// Copies RGBA8 pictures into the overlay's swap-chain textures (which rest in
+// PIXEL_SHADER_RESOURCE) on the game's DIRECT queue, with a ring of staging buffers. The
+// draw thread fills a slot (and waits there, never on the game's thread, if the GPU is still
+// reading it); the game's render thread only executes a command list recorded once per
+// (slot, texture) and signals the fence: a few microseconds inside Echo's frame.
 class Uploader {
 public:
+    static constexpr int kSlots = 3, kMaxTextures = 8;
     ~Uploader() { reset(); }
 
-    const char* init(ID3D12CommandQueue* queue, const D3D12_RESOURCE_DESC& desc) {
+    const char* init(ID3D12CommandQueue* queue, const std::vector<ID3D12Resource*>& textures) {
         reset();
+        if (textures.empty() || textures.size() > kMaxTextures) return "1 to 8 textures";
         if (queue->GetDesc().Type != D3D12_COMMAND_LIST_TYPE_DIRECT) return "queue is not a DIRECT queue";
         if (FAILED(queue->GetDevice(IID_PPV_ARGS(&device_)))) return "GetDevice failed";
         queue_ = queue;
-        desc_ = desc;
+        D3D12_RESOURCE_DESC desc = textures[0]->GetDesc();
         UINT64 rowBytes;
-        device_->GetCopyableFootprints(&desc_, 0, 1, 0, &footprint_, &rows_, &rowBytes, &total_);
+        device_->GetCopyableFootprints(&desc, 0, 1, 0, &footprint_, &rows_, &rowBytes, &total_);
         if (FAILED(device_->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence_)))) return "fence failed";
         event_ = CreateEventW(nullptr, FALSE, FALSE, nullptr);
         if (!event_) return "event failed";
@@ -943,51 +991,105 @@ public:
         bd.Height = bd.DepthOrArraySize = bd.MipLevels = 1;
         bd.SampleDesc.Count = 1;
         bd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        textureCount_ = int(textures.size());
         for (Slot& s : slots_) {
             if (FAILED(device_->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &bd, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
                                                         IID_PPV_ARGS(&s.staging)))) return "upload buffer failed";
             if (FAILED(s.staging->Map(0, nullptr, reinterpret_cast<void**>(&s.mapped)))) return "Map failed";
             if (FAILED(device_->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&s.alloc)))) return "allocator failed";
-            if (FAILED(device_->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, s.alloc, nullptr, IID_PPV_ARGS(&s.list)))) return "list failed";
-            s.list->Close();
+            for (int i = 0; i < textureCount_; i++) {  // recorded once, executed every time this slot goes to texture i
+                ID3D12GraphicsCommandList* list = nullptr;
+                if (FAILED(device_->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, s.alloc, nullptr, IID_PPV_ARGS(&list)))) return "list failed";
+                s.lists[i] = list;
+                D3D12_RESOURCE_BARRIER b{};
+                b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+                b.Transition.pResource = textures[i];
+                b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+                b.Transition.StateBefore = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+                b.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
+                list->ResourceBarrier(1, &b);
+                D3D12_TEXTURE_COPY_LOCATION dst{textures[i], D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX};
+                dst.SubresourceIndex = 0;
+                D3D12_TEXTURE_COPY_LOCATION src{s.staging, D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT};
+                src.PlacedFootprint = footprint_;
+                list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+                std::swap(b.Transition.StateBefore, b.Transition.StateAfter);
+                list->ResourceBarrier(1, &b);
+                if (FAILED(list->Close())) return "Close failed";
+            }
         }
         return nullptr;
     }
+    bool ready() const { return queue_ != nullptr; }
+    UINT width() const { return footprint_.Footprint.Width; }
+    UINT rows() const { return rows_; }
 
-    // Queues a full-texture copy of `rgba` (width*height*4 bytes) into `texture`.
-    const char* write(ID3D12Resource* texture, const uint8_t* rgba) {
-        if (!queue_) return "not initialised";
-        Slot& s = slots_[next_++ % 3];
-        if (fence_->GetCompletedValue() < s.done) {
-            fence_->SetEventOnCompletion(s.done, event_);
-            if (WaitForSingleObject(event_, 100) != WAIT_OBJECT_0) return "GPU busy";
+    // Draw thread: the next staging slot, once the GPU has finished its last copy out of it
+    // (waits here). -1 if that wait timed out or nothing is set up.
+    int acquire(DWORD timeoutMs = 1000) {
+        if (!queue_) return -1;
+        for (int tries = 0; tries < 100000; tries++) {
+            int k = int(next_ % kSlots);
+            int st = state_[k].load();
+            if (st == kSubmitting) { Sleep(0); continue; }  // the game's thread is on it: microseconds
+            if (st == kReady) {                             // a picture it never showed: ours again
+                int expectReady = k;
+                ready_.compare_exchange_strong(expectReady, -1);
+            }
+            int expect = st == kReady ? kReady : kFree;
+            if (!state_[k].compare_exchange_strong(expect, kFilling)) continue;
+            next_++;
+            UINT64 done = done_[k].load();
+            if (fence_->GetCompletedValue() < done) {
+                fence_->SetEventOnCompletion(done, event_);
+                if (WaitForSingleObject(event_, timeoutMs) != WAIT_OBJECT_0) { state_[k] = kFree; return -1; }
+            }
+            return k;
         }
-        UINT w = UINT(footprint_.Footprint.Width);
+        return -1;
+    }
+    // Draw thread: the whole picture (width*rows*4 bytes) into the slot.
+    void fill(int slot, const uint8_t* rgba) {
+        Slot& s = slots_[slot];
+        UINT w = width();
         for (UINT y = 0; y < rows_; y++)
             std::memcpy(s.mapped + footprint_.Offset + UINT64(y) * footprint_.Footprint.RowPitch, rgba + size_t(y) * w * 4, size_t(w) * 4);
-        if (FAILED(s.alloc->Reset()) || FAILED(s.list->Reset(s.alloc, nullptr))) return "list reset failed";
-        D3D12_RESOURCE_BARRIER b{};
-        b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-        b.Transition.pResource = texture;
-        b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-        b.Transition.StateBefore = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
-        b.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
-        s.list->ResourceBarrier(1, &b);
-        D3D12_TEXTURE_COPY_LOCATION dst{texture, D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX};
-        dst.SubresourceIndex = 0;
-        D3D12_TEXTURE_COPY_LOCATION src{s.staging, D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT};
-        src.PlacedFootprint = footprint_;
-        s.list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
-        std::swap(b.Transition.StateBefore, b.Transition.StateAfter);
-        s.list->ResourceBarrier(1, &b);
-        if (FAILED(s.list->Close())) return "Close failed";
-        ID3D12CommandList* lists[] = {s.list};
-        queue_->ExecuteCommandLists(1, lists);
-        s.done = ++fenceValue_;
-        if (FAILED(queue_->Signal(fence_, s.done))) return "Signal failed";
-        return nullptr;
     }
-
+    // Draw thread: the slot holds a finished picture.
+    void publish(int slot) {
+        state_[slot] = kReady;
+        ready_ = slot;
+    }
+    // Game thread: the newest finished picture's slot, now ours to submit; -1 if none.
+    int takeReady() {
+        int k = ready_.exchange(-1);
+        if (k < 0) return -1;
+        int expect = kReady;
+        return state_[k].compare_exchange_strong(expect, kSubmitting) ? k : -1;
+    }
+    // Game thread: copy the slot into texture `index` on the queue and let the slot go once
+    // the GPU is done with it.
+    const char* submit(int slot, int index) {
+        if (index < 0 || index >= textureCount_) { discard(slot); return "bad texture index"; }
+        ID3D12CommandList* lists[] = {slots_[slot].lists[index]};
+        queue_->ExecuteCommandLists(1, lists);
+        UINT64 v = ++fenceValue_;
+        HRESULT hr = queue_->Signal(fence_, v);
+        done_[slot] = v;
+        state_[slot] = kFree;
+        return FAILED(hr) ? "Signal failed" : nullptr;
+    }
+    void discard(int slot) { state_[slot] = kFree; }
+    // Fill and submit in one go (the first, clear picture; tests).
+    const char* write(int index, const uint8_t* rgba) {
+        int k = acquire(1000);
+        if (k < 0) return "GPU busy";
+        fill(k, rgba);
+        publish(k);
+        int t = takeReady();
+        if (t != k) return "slot taken";
+        return submit(t, index);
+    }
     // Blocks until every queued copy has finished (tests and shutdown).
     bool flush() {
         if (!fence_ || fence_->GetCompletedValue() >= fenceValue_) return true;
@@ -996,21 +1098,23 @@ public:
     }
 
 private:
+    enum { kFree = 0, kFilling = 1, kReady = 2, kSubmitting = 3 };
     struct Slot {
         ID3D12Resource* staging = nullptr;
         uint8_t* mapped = nullptr;
         ID3D12CommandAllocator* alloc = nullptr;
-        ID3D12GraphicsCommandList* list = nullptr;
-        UINT64 done = 0;
+        ID3D12GraphicsCommandList* lists[kMaxTextures] = {};
     };
     void reset() {
         flush();
         for (Slot& s : slots_) {
-            if (s.list) s.list->Release();
+            for (auto* l : s.lists) if (l) l->Release();
             if (s.alloc) s.alloc->Release();
             if (s.staging) s.staging->Release();
             s = Slot{};
         }
+        for (int i = 0; i < kSlots; i++) { state_[i] = kFree; done_[i] = 0; }
+        ready_ = -1;
         if (fence_) fence_->Release();
         if (device_) device_->Release();
         if (event_) CloseHandle(event_);
@@ -1018,16 +1122,20 @@ private:
         device_ = nullptr;
         event_ = nullptr;
         queue_ = nullptr;
+        textureCount_ = 0;
     }
     ID3D12Device* device_ = nullptr;
     ID3D12CommandQueue* queue_ = nullptr;
     ID3D12Fence* fence_ = nullptr;
     HANDLE event_ = nullptr;
-    D3D12_RESOURCE_DESC desc_{};
     D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint_{};
     UINT rows_ = 0;
     UINT64 total_ = 0, fenceValue_ = 0, next_ = 0;
-    Slot slots_[3];
+    int textureCount_ = 0;
+    Slot slots_[kSlots];
+    std::atomic<int> state_[kSlots] = {};
+    std::atomic<UINT64> done_[kSlots] = {};
+    std::atomic<int> ready_{-1};
 };
 
 }  // namespace hudplus
