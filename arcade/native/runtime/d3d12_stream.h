@@ -9,12 +9,17 @@
 // POSTER_TEX_H, where the frame goes at POSTER_X0, POSTER_Y0). Uploads are recorded on
 // the game's own direct queue, just before one of its submissions, so they are ordered
 // with the frames that sample them.
+#include "../shared/poster_turn.h"
+
 namespace stream {
 bool install(arcade::Shared* shared);  // hooks D3D12; call from a normal thread (not DllMain)
 void setVisible(bool visible);         // tablet: upload only while the ARCADE page is on screen
 // Poster: upload only while docked. Turning it off takes effect before this returns, so
 // the caller can let the engine release the texture right after.
 void setPosterActive(bool active);
+// A docked display whose art is stored turned (the social lobby's central one): the frame goes
+// into its own texture, turned to stand upright on it.
+void setTurnedActive(bool active, PosterTurn turn);
 bool posterTextureReady();             // the engine has created the poster texture
 void shutdown();
 }

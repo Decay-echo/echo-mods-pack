@@ -41,7 +41,7 @@ FROM_DISC = {
     'hud_lines/README.md': 'hud_lines/README.md',
 }
 ARCADE_BUILT = ['dist/EchoArcade.dll', 'dist/EchoArcade/ArcadeHost.exe']
-ZIP_SKIP = {'.git', 'tools', 'dist', '.gitignore', '.gitattributes', 'check.txt'}
+ZIP_SKIP = {'.git', 'tools', 'dist', '.gitignore', '.gitattributes', 'check.txt', 'last_install.txt'}
 
 
 def main():

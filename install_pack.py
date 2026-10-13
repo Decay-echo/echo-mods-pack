@@ -8,6 +8,8 @@ Options: --game PATH   your ready-at-dawn-echo-arena folder (found by itself in 
          --no-arcade   only the HUD
          --no-hud      only Echo Arcade
          --reset-hud   switch to this version's HUD settings (an earlier install keeps its own otherwise)
+         --loader      put the pack's EchoLoader (loader/dbgcore.dll) in the game even if one is there
+                       (a different build that loads no plugins); the old one is kept as dbgcore.dll.before-pack
 
 Close Echo VR first. Needs Python 3.10+, internet (Python packages, RetroArch and the other
 arcade apps), and EchoLoader in the game (the community Echo VR installer sets it up).
@@ -30,6 +32,8 @@ VENV_PY = ARCADE / '.venv' / 'Scripts' / 'python.exe'
 PACKAGES = ['zstandard==0.25.0', 'pillow', 'texture2ddecoder']
 PKG_TOOLS = ARCADE / 'vendor' / 'Doom-on-EchoVR' / 'EchoVr-Tablet-Probing'  # Echo package reader (downloaded)
 ECHO_BUILD = 1683152886  # echovr.exe timestamp of the final Echo VR build (the one community servers run)
+LOADER = HERE / 'loader' / 'dbgcore.dll'  # EchoLoader as the community installer sets it up (see loader\README.txt)
+LOADER_JSON = {'log_path': 'plugin_logs', 'plugins_dir': 'plugins', 'plugins': []}
 
 
 def game_helpers():
@@ -39,8 +43,17 @@ def game_helpers():
     return module
 
 
+def note_outcome(text):
+    """What the last INSTALL / UNINSTALL ended with, for CHECK.cmd."""
+    try:
+        (HERE / 'last_install.txt').write_text(time.strftime('%Y-%m-%d %H:%M') + ' ' + ' '.join(sys.argv[1:]) + ': ' + text + '\n', encoding='utf-8')
+    except OSError:
+        pass
+
+
 def stop(text):
     print('\nSTOPPED: ' + text)
+    note_outcome('STOPPED: ' + text)
     sys.exit(1)
 
 
@@ -87,7 +100,46 @@ def loader_plugins(win10: Path):
         return []
 
 
-def check_game(game: Path, want_hud_lines: bool):
+def sha256(path: Path):
+    import hashlib
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def ensure_loader(game: Path, force: bool):
+    """EchoLoader in the game: the pack's copy goes in when there is none (or with --loader);
+    a different build that is there is left alone otherwise, with a word about --loader."""
+    win10 = game / 'bin' / 'win10'
+    dll, cfg = win10 / 'dbgcore.dll', win10 / 'echoloader.json'
+    if not LOADER.is_file():
+        if not dll.is_file() or not cfg.is_file():
+            stop('EchoLoader is not installed in this game (bin\\win10\\dbgcore.dll and echoloader.json) and this copy of the '
+                 'pack carries none. It comes with the community Echo VR installer: set that up, start Echo VR once, close it, '
+                 'then run INSTALL.cmd again.')
+        return
+    if dll.is_file() and sha256(dll) == sha256(LOADER):
+        pass
+    elif not dll.is_file() or force:
+        if dll.is_file():
+            backup = dll.with_name('dbgcore.dll.before-pack')
+            if not backup.exists():
+                dll.replace(backup)
+            else:
+                dll.unlink()
+            print(f'Replaced EchoLoader (bin\\win10\\dbgcore.dll) with the pack\'s; the old one is kept as {backup.name}.')
+        else:
+            print('EchoLoader was not in the game: put the pack\'s in (bin\\win10\\dbgcore.dll).')
+        import shutil
+        shutil.copy2(LOADER, dll)
+    else:
+        print('NOTE: the game\'s EchoLoader (bin\\win10\\dbgcore.dll) is a different build than the pack\'s. If the plugins do not '
+              'load (no HUD, the arcade tab does nothing), run INSTALL.cmd --loader to use the pack\'s.')
+    if not cfg.is_file():
+        cfg.write_text(json.dumps(LOADER_JSON, indent=4) + '\n', encoding='utf-8')
+        print('Created bin\\win10\\echoloader.json.')
+    (win10 / 'plugins').mkdir(exist_ok=True)
+
+
+def check_game(game: Path, want_hud_lines: bool, loader: bool = False):
     """Stops on what can't work; returns whether the HUD lines (NvrAssetPatches) can go in."""
     win10 = game / 'bin' / 'win10'
     exe = win10 / 'echovr.exe'
@@ -96,10 +148,7 @@ def check_game(game: Path, want_hud_lines: bool):
     if exe_timestamp(exe) != ECHO_BUILD:
         stop('This Echo VR build is not the one the pack was made for (the final build community servers use). '
              'Nothing was changed.')
-    if not (win10 / 'echoloader.json').is_file() or not (win10 / 'dbgcore.dll').is_file():
-        stop('EchoLoader is not installed in this game (bin\\win10\\dbgcore.dll and echoloader.json). It comes with the '
-             'community Echo VR installer: set that up, start Echo VR once, close it, then run INSTALL.cmd again.')
-    (win10 / 'plugins').mkdir(exist_ok=True)
+    ensure_loader(game, loader)
     if not want_hud_lines:
         return False
     has_plugin = (win10 / 'plugins' / 'NvrAssetPatches.dll').is_file() and 'nvrassetpatches.dll' in loader_plugins(win10)
@@ -132,7 +181,7 @@ def install(args):
     print('game:', game)
     if g.game_running():
         stop('Echo VR is running. Close it completely, then run this again.')
-    hud_lines = check_game(game, not args.no_hud)
+    hud_lines = check_game(game, not args.no_hud, args.loader)
     total = 6
     print(f'\n[1/{total}] Python environment')
     python_env()
@@ -186,6 +235,7 @@ def install(args):
         print(' - Arcade: open the hand tablet and press the gamepad tab (far left). FREEZE (top of the launcher) '
               'lets your Touch controllers play RetroArch or Minecraft; both hands above your head for 5 s to move again.')
         print('   Your games go in ' + str(ARCADE / 'apps' / 'roms') + ' (one folder per system, see the README there).')
+    note_outcome('ALL DONE')
 
 
 def tail(path: Path, n=12):
@@ -212,22 +262,58 @@ def check(args):
     say('game: ' + str(game))
     say('Echo VR running now: ' + ('yes (start it and open the tablet, then close it and run this again)' if g.game_running() else 'no'))
     say('')
+    last = tail(HERE / 'last_install.txt', 3)
+    say('[last INSTALL / UNINSTALL from this folder]')
+    say('  ' + (last[-1] if last else 'no record (an older version of the pack, or never run from here)'))
+    say('')
     say('[EchoLoader]')
     loader = win10 / 'echoloader.json'
-    say('  dbgcore.dll: ' + ('present' if (win10 / 'dbgcore.dll').is_file() else 'MISSING (EchoLoader is not installed)'))
+    dll = win10 / 'dbgcore.dll'
+    if dll.is_file():
+        same = LOADER.is_file() and sha256(dll) == sha256(LOADER)
+        say(f'  dbgcore.dll: {dll.stat().st_size} bytes, sha256 {sha256(dll)[:16]}... ' + ('(the pack\'s build)' if same else '(a DIFFERENT build than the pack\'s: INSTALL.cmd --loader uses the pack\'s)'))
+    else:
+        say('  dbgcore.dll: MISSING (EchoLoader is not installed)')
+    log_dir = 'plugin_logs'
     try:
-        cfg = json.loads(loader.read_text(encoding='utf-8'))
-        say('  echoloader.json plugins: ' + ', '.join(p.get('file', '?') for p in cfg.get('plugins', []) if isinstance(p, dict)))
+        raw = loader.read_text(encoding='utf-8')
+        cfg = json.loads(raw)
+        log_dir = str(cfg.get('log_path', 'plugin_logs'))
+        say('  echoloader.json plugins: ' + ', '.join(p.get('file', '?') if isinstance(p, dict) else str(p) for p in cfg.get('plugins', [])))
+        say('  echoloader.json as it is:')
+        for l in raw.splitlines()[:40]:
+            say('    ' + l.rstrip()[:160])
     except (OSError, ValueError) as e:
         say(f'  echoloader.json: cannot read ({e})')
-    for name in ('EchoArcade.dll', 'EchoHudPlus.dll', 'NvrAssetPatches.dll'):
-        f = win10 / 'plugins' / name
-        say(f'  plugins\\{name}: ' + (f'{f.stat().st_size} bytes' if f.is_file() else 'MISSING (quarantined by an antivirus, or never installed)'))
-    log = win10 / 'plugin_logs' / 'loader.log'
-    lines = tail(log, 400)
+    say('  everything in plugins\\:')
+    try:
+        for f in sorted((win10 / 'plugins').iterdir()):
+            say(f'    {f.name}' + (f'  ({f.stat().st_size} bytes)' if f.is_file() else '  (folder)'))
+    except OSError as e:
+        say(f'    cannot list: {e}')
+    for name in ('EchoArcade.dll', 'EchoHudPlus.dll'):
+        if not (win10 / 'plugins' / name).is_file():
+            say(f'  plugins\\{name}: MISSING (quarantined by an antivirus, or never installed)')
+    # The loader's log: where echoloader.json says, else any loader log under bin\win10.
+    logs = [win10 / log_dir / 'loader.log', win10 / 'plugin_logs' / 'loader.log']
+    try:
+        logs += sorted((f for f in win10.rglob('*loader*.log') if f.is_file()), key=lambda f: f.stat().st_mtime, reverse=True)
+    except OSError:
+        pass
+    seen, log = set(), None
+    for candidate in logs:
+        if candidate in seen or not candidate.is_file():
+            continue
+        seen.add(candidate)
+        log = log or candidate
+    other = [str(f.relative_to(win10)) for f in seen if f != log]
+    if other:
+        say('  other loader logs: ' + ', '.join(other))
+    lines = tail(log, 400) if log else None
     if lines is None:
-        say('  loader.log: none (Echo VR has not started with EchoLoader since the install, or EchoLoader is not running)')
+        say(f'  loader log: none under {win10} (Echo VR has not started with EchoLoader since the install, or EchoLoader writes no log)')
     else:
+        say(f'  loader log: {log} (changed {time.strftime("%Y-%m-%d %H:%M", time.localtime(log.stat().st_mtime))})')
         starts = [i for i, l in enumerate(lines) if 'Loading plugin:' in l]
         last = lines[max(0, starts[0] - 5):] if starts else lines[-20:]
         # the last start of Echo: from its first "Loading plugin" to its summary
@@ -271,13 +357,22 @@ def check(args):
     say('')
     say('[antivirus]')
     try:
-        r = subprocess.run(['powershell', '-NoProfile', '-Command',
-                            'Get-MpThreatDetection | Sort-Object InitialDetectionTime -Descending | Select-Object -First 8 | '
-                            'ForEach-Object { $_.InitialDetectionTime.ToString("s") + "  " + ($_.Resources -join ", ") }'],
-                           capture_output=True, text=True, timeout=60)
-        hits = [l for l in r.stdout.splitlines() if l.strip()]
-        ours = [l for l in hits if any(k in l for k in ('EchoArcade', 'EchoHudPlus', 'EchoModsPack', 'ArcadeHost', 'retroarch'))]
-        say('  Defender detections touching the pack: ' + (' | '.join(ours) if ours else 'none seen' if not r.returncode else 'could not ask'))
+        script = ('$names = @{}; Get-MpThreat -ErrorAction SilentlyContinue | ForEach-Object { $names[[string]$_.ThreatID] = $_.ThreatName }; '
+                  'Get-MpThreatDetection -ErrorAction SilentlyContinue | Sort-Object InitialDetectionTime -Descending | Select-Object -First 12 | '
+                  'ForEach-Object { $files = @($_.Resources | ForEach-Object { ($_ -split "\\|")[0] } | Where-Object { $_ -like "file:*" } | '
+                  'ForEach-Object { $_ -replace "^file:_", "" }); $_.InitialDetectionTime.ToString("s") + "  " + $names[[string]$_.ThreatID] + '
+                  '"  status " + $_.CurrentThreatExecutionStatusID + "/" + $_.ThreatStatusID + "  " + ($files -join ", ") }')
+        r = subprocess.run(['powershell', '-NoProfile', '-Command', script], capture_output=True, text=True, timeout=90)
+        hits = [l.strip() for l in r.stdout.splitlines() if l.strip()]
+        ours = [l for l in hits if any(k in l for k in ('EchoArcade', 'EchoHudPlus', 'EchoModsPack', 'ArcadeHost', 'retroarch', 'ready-at-dawn'))]
+        if ours:
+            say('  Defender detections touching the pack (threat name, status, files):')
+            for l in ours:
+                say('    ' + l[:300])
+            say('  -> Windows Security > Protection history: Allow / Restore these, and add the EchoModsPack folder and')
+            say('     the game\'s bin\\win10\\plugins folder under Virus & threat protection settings > Exclusions. Then INSTALL again.')
+        else:
+            say('  Defender detections touching the pack: ' + ('none seen' if not r.returncode else 'could not ask'))
     except (OSError, subprocess.TimeoutExpired):
         say('  Defender: could not ask')
     (HERE / 'check.txt').write_text('\n'.join(out) + '\n', encoding='utf-8')
@@ -309,6 +404,7 @@ def main():
     ap.add_argument('--game', help='your ready-at-dawn-echo-arena folder')
     ap.add_argument('--uninstall', action='store_true')
     ap.add_argument('--check', action='store_true', help='what is installed and whether it ran (writes check.txt)')
+    ap.add_argument('--loader', action='store_true', help="put the pack's EchoLoader in the game even if a different build is there")
     ap.add_argument('--no-arcade', action='store_true', help='leave Echo Arcade out')
     ap.add_argument('--no-hud', action='store_true', help='leave the HUD out')
     ap.add_argument('--dry-run', action='store_true', help='download and prepare everything, but change nothing in the game')

@@ -19,6 +19,10 @@ TAB_Y = (662, 751)
 # ~1.87:1 face, so it keeps its shape on both the flat and the curved posters. Unique size.
 POSTER_TEX_W, POSTER_TEX_H = 1249, 612
 POSTER_X0, POSTER_Y0 = 45, 20              # where the 1024 x 574 frame goes in that texture
+# The same again, one pixel narrower (sizes are how the runtime tells textures apart), for
+# posters whose art is stored turned (the social lobby's central display): the frame goes in
+# turned to match, so the picture stands upright on them.
+POSTER_TURNED_W, POSTER_TURNED_H = 1248, 612
 
 
 def tab_rect(slot):

@@ -26,6 +26,7 @@
 #include "log.h"
 #include "../generated/arcade_tab.h"
 #include "../generated/posters.h"
+#include "../shared/poster_turn.h"
 #include "../vendor/minhook/include/MinHook.h"
 #include <algorithm>
 #include <atomic>
@@ -136,11 +137,21 @@ void closest(const Tri& t, Vec p, float& wa, float& wb, float& wc) {
     wb = vb * denom; wc = vc * denom; wa = 1 - wb - wc;
 }
 
-// Mesh UV -> host screen pixel (the shader doubles v; see arcade_layout.py).
-bool toPixel(float u, float v, int& x, int& y) {
+// How mesh `mesh` carries the picture (poster_turn.h); the usual way when it has no face.
+PosterTurn turnOf(unsigned mesh) {
+    if (mesh == POSTER_NO_MESH) return POSTER_UPRIGHT;
+    const PosterMesh& m = POSTER_MESHES[mesh];
+    return {m.ur, m.ud, m.vr, m.vd};
+}
+
+// Mesh UV -> host screen pixel (the shader doubles v; see arcade_layout.py), through the
+// mesh's picture turn.
+bool toPixel(float u, float v, unsigned mesh, int& x, int& y) {
     float fx = u * POSTER_TEX_W - POSTER_X0, fy = 2 * v * POSTER_TEX_H - POSTER_Y0;
     if (!(fx >= 0 && fy >= 0 && fx < POSTER_FRAME_W && fy < POSTER_FRAME_H)) return false;
-    x = int(fx); y = int(fy);
+    float ux, uy;
+    if (!turnToUi(turnOf(mesh), int(POSTER_FRAME_W), int(POSTER_FRAME_H), fx, fy, ux, uy)) return false;
+    x = int(ux); y = int(uy);
     return true;
 }
 void interpolate(const Tri& t, float wa, float wb, float wc, float& u, float& v) {
@@ -159,6 +170,7 @@ struct Dock {
     unsigned index = 0;
     U actor = 0, handle = 0, savedName = NONE, savedKey = NONE;
     unsigned mesh = 0;
+    U texture = 0;       // the arcade texture it shows: the usual one, or the turned one
     Xform level, space;  // poster in its level, level in the world
     std::vector<Xform> faces;
 };
@@ -229,6 +241,18 @@ void answer(LONG state, const char* fmt, ...) {
 
 LONG dockedState() { return docks.empty() ? arcade::Undocked : arcade::Docked; }
 
+// Tells the stream which poster textures to feed: the usual one, the turned one, or neither.
+void syncStream() {
+    bool usual = false, turnedAny = false;
+    PosterTurn turn = POSTER_UPRIGHT;
+    for (auto& d : docks) {
+        if (turned(turnOf(d.mesh))) { turnedAny = true; turn = turnOf(d.mesh); }
+        else usual = true;
+    }
+    stream::setPosterActive(usual);
+    stream::setTurnedActive(turnedAny, turn);
+}
+
 void releaseFingers();
 bool playerPosition(void* gs, U now, Vec& out);
 
@@ -254,7 +278,8 @@ bool slotStill(const Dock& d) {
 // Every poster back to its own picture, and the session's list forgotten (DOCK turned off).
 void undockAll(const char* why) {
     if (docks.empty()) { answer(arcade::Undocked, "%s", why); return; }
-    stream::setPosterActive(false);  // no copies into the texture from here on
+    stream::setPosterActive(false);  // no copies into the textures from here on
+    stream::setTurnedActive(false, POSTER_UPRIGHT);
     releaseFingers();
     for (auto it = docks.rbegin(); it != docks.rend(); ++it)
         if (slotStill(*it)) restoreArt(it->cs, it->index, it->savedName, it->savedKey);
@@ -272,6 +297,7 @@ int dockSlot(void* cs, unsigned slot, Xform space) {
     P item = at<P>(cs, 0x100) + size_t(slot) * POSTER_STRIDE;
     Dock d;
     d.cs = cs; d.gs = gs; d.index = slot; d.actor = info.actor; d.handle = at<U>(keys, size_t(slot) * 16); d.mesh = info.mesh;
+    d.texture = turned(turnOf(info.mesh)) ? ARCADE_POSTER_TURNED_TEXTURE : ARCADE_POSTER_TEXTURE;
     d.level = placement(info);
     d.space = space;
     d.faces.push_back(d.level);
@@ -283,7 +309,7 @@ int dockSlot(void* cs, unsigned slot, Xform space) {
     d.savedName = at<U>(item, 0x08);
     d.savedKey = at<U>(item, 0x48);
     at<U>(item, 0x48) = NONE;  // stop the server's poster from being resolved back in
-    at<U>(item, 0x08) = ARCADE_POSTER_TEXTURE;
+    at<U>(item, 0x08) = d.texture;
     U key[2] = {at<U>(keys, size_t(slot) * 16), at<U>(keys, size_t(slot) * 16 + 8)};
     // Its own art slice, as the engine passes (slice -1 drew the docked poster black).
     int r = overrideTexture(cs, key, item, at<unsigned>(item, 4));
@@ -296,10 +322,10 @@ int dockSlot(void* cs, unsigned slot, Xform space) {
     docks.push_back(d);
     remembered.insert(info.actor);
     Vec center = centerOf(info, space);
-    logf("posters: docked on %016llx (system %p slot %u, was %016llx/%016llx) at %.2f %.2f %.2f; %zu poster(s) of this model; %zu dock(s) now; texture %s",
+    logf("posters: docked on %016llx (system %p slot %u, was %016llx/%016llx) at %.2f %.2f %.2f; %zu poster(s) of this model; %zu dock(s) now; texture %s%s",
          info.actor, cs, slot, d.savedName, d.savedKey, center.x, center.y, center.z, d.faces.size(), docks.size(),
-         stream::posterTextureReady() ? "ready" : "NOT CREATED YET");
-    stream::setPosterActive(true);
+         stream::posterTextureReady() ? "ready" : "NOT CREATED YET", d.texture == ARCADE_POSTER_TURNED_TEXTURE ? " (picture turned for this display)" : "");
+    syncStream();
     return 0;
 }
 
@@ -395,7 +421,8 @@ void maintain() {
         if (!slotStill(d)) {
             logf("posters: poster %016llx went away; %zu dock(s) left", d.actor, docks.size() - 1);
             docks.erase(docks.begin() + long(k));
-            if (docks.empty()) { stream::setPosterActive(false); releaseFingers(); }
+            syncStream();
+            if (docks.empty()) releaseFingers();
             answer(dockedState(), docks.empty() ? "The poster went away; undocked." : "Docked on %zu poster(s).", docks.size());
             continue;
         }
@@ -403,17 +430,18 @@ void maintain() {
         // The server assigned new art to this poster while it is docked: remember it for
         // undock and keep the arcade on.
         if (at<U>(item, 0x48) != NONE) { d.savedKey = at<U>(item, 0x48); at<U>(item, 0x48) = NONE; }
-        if (at<U>(item, 0x08) != ARCADE_POSTER_TEXTURE) {
+        if (at<U>(item, 0x08) != d.texture) {
             logf("posters: the art of %016llx changed under the dock; putting the arcade back", d.actor);
             d.savedName = at<U>(item, 0x08);
-            at<U>(item, 0x08) = ARCADE_POSTER_TEXTURE;
+            at<U>(item, 0x08) = d.texture;
             U key[2] = {at<U>(at<P>(d.cs, 0x108), size_t(d.index) * 16), at<U>(at<P>(d.cs, 0x108), size_t(d.index) * 16 + 8)};
             int r = overrideTexture(d.cs, key, item, at<unsigned>(item, 4));
             if (r != 0) {
                 at<U>(item, 0x08) = d.savedName;
                 logf("posters: the server replaced %016llx (%d); that one is undocked", d.actor, r);
                 docks.erase(docks.begin() + long(k));
-                if (docks.empty()) { stream::setPosterActive(false); releaseFingers(); }
+                syncStream();
+                if (docks.empty()) releaseFingers();
                 answer(dockedState(), docks.empty() ? "The server replaced the poster; undocked." : "Docked on %zu poster(s).", docks.size());
                 continue;
             }
@@ -494,6 +522,7 @@ float lastFace = 1e9f, lastFront = 0;  // the last contact() test: metres from t
 // Where a fingertip touches a poster showing the arcade: pixel, or false when not touching.
 bool contact(Vec tip, bool wasDown, int& x, int& y) {
     float best = 1e9f, bestSigned = 0, u = 0, v = 0;
+    unsigned bestMesh = POSTER_NO_MESH;
     for (const Dock& dock : docks)
     for (const Xform& face : dock.faces) {
         if (!hasFace(dock.mesh)) break;
@@ -507,6 +536,7 @@ bool contact(Vec tip, bool wasDown, int& x, int& y) {
             if (distance < best) {
                 best = distance;
                 bestSigned = dot(local - p, t.n) * scale;
+                bestMesh = dock.mesh;
                 interpolate(t, wa, wb, wc, u, v);
             }
         }
@@ -516,7 +546,7 @@ bool contact(Vec tip, bool wasDown, int& x, int& y) {
     // Touching: within 1.5 cm in front (4 cm once down) and up to 8 cm through the surface.
     float front = wasDown ? .04f : .015f;
     if (!(bestSigned < front && bestSigned > -.08f && best < .12f)) return false;
-    return toPixel(u, v, x, y);
+    return toPixel(u, v, bestMesh, x, y);
 }
 
 void afterButton(void* cs, U now) {
@@ -572,6 +602,7 @@ void afterButton(void* cs, U now) {
 // Where a ray (world space) first meets a poster showing the arcade: pixel and distance in metres.
 bool rayHit(Vec worldOrigin, Vec worldDir, int& x, int& y, float& metres) {
     float bestMetres = 1e9f, u = 0, v = 0;
+    unsigned hitMesh = POSTER_NO_MESH;
     for (const Dock& dock : docks)
     for (const Xform& face : dock.faces) {
         if (!hasFace(dock.mesh)) break;
@@ -590,11 +621,11 @@ bool rayHit(Vec worldOrigin, Vec worldDir, int& x, int& y, float& metres) {
             float c = dot(d, qv) * inv;
             if (c < 0 || b + c > 1) continue;
             float along = dot(e2, qv) * inv;
-            if (along > 0 && along * toMetres < bestMetres) { bestMetres = along * toMetres; interpolate(t, 1 - b - c, b, c, u, v); }
+            if (along > 0 && along * toMetres < bestMetres) { bestMetres = along * toMetres; hitMesh = dock.mesh; interpolate(t, 1 - b - c, b, c, u, v); }
         }
     }
     metres = bestMetres;
-    return bestMetres < 1e9f && toPixel(u, v, x, y);
+    return bestMetres < 1e9f && toPixel(u, v, hitMesh, x, y);
 }
 
 // Light gun: a local shot's ray against the docked poster's face.

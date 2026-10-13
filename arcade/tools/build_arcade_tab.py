@@ -31,7 +31,7 @@ from echovr_patch import Patcher, ManifestFile, MID, GAME_MANIFEST, GAME_PACKAGE
 from build_tools_tab import empty_canvas, ROOT_CANVAS, NAV_CANVAS, LEVEL, ACTOR  # noqa: E402
 from arcade_layout import (PAGE_W, PAGE_H, PAGE_X, PAGE_Y, SCREEN_RECT, TEX_W, TEX_H,  # noqa: E402
                            GRID_COLS, GRID_ROWS, TAB_SLOT_CENTERS, ARCADE_SLOT, STOCK_SLOTS,
-                           SETTINGS_SLOT, POSTER_TEX_W, POSTER_TEX_H, POSTER_X0, POSTER_Y0,
+                           SETTINGS_SLOT, POSTER_TEX_W, POSTER_TEX_H, POSTER_X0, POSTER_Y0, POSTER_TURNED_W, POSTER_TURNED_H,
                            tab_rect, splash_bgra)
 import build_poster_table  # noqa: E402
 from tab_icon import tab_icons  # noqa: E402
@@ -43,6 +43,7 @@ NAV_SOURCE_BUTTON = 0x275876572b742791
 PAGE = P.sym('echo_arcade_page_v1')
 TEXTURE = P.sym('echo_arcade_screen_v1')
 POSTER_TEXTURE = P.sym('echo_arcade_poster_screen_v1')
+POSTER_TURNED_TEXTURE = P.sym('echo_arcade_poster_turned_v1')  # for displays whose art is stored turned
 ICON_TEXTURE = P.sym('echo_arcade_tab_icon_texture_v1')
 TAB_BUTTON = P.sym('echo_arcade_tab_button_v1')
 SETTINGS_BUTTON = P.sym('echo_arcade_settings_button_v1')
@@ -93,13 +94,15 @@ def atlas_image(stock):
     return Image.frombytes('RGBA', (w, h), bgra, 'raw', 'BGRA')
 
 
-def poster_bgra():
-    """Poster texture: dark, with the splash where the frame streams (arcade_layout.py)."""
-    px = bytearray(bytes((30, 22, 20, 255)) * (POSTER_TEX_W * POSTER_TEX_H))
-    splash = splash_bgra(('ECHO ARCADE', 'DOCKED'))
-    for y in range(TEX_H):
-        start = ((POSTER_Y0 + y) * POSTER_TEX_W + POSTER_X0) * 4
-        px[start:start + TEX_W * 4] = splash[y * TEX_W * 4:(y + 1) * TEX_W * 4]
+def poster_bgra(width=POSTER_TEX_W, height=POSTER_TEX_H, splash=True):
+    """Poster texture: dark, with the splash where the frame streams (arcade_layout.py). The
+    turned one stays dark until the runtime paints it (its picture is turned to the display)."""
+    px = bytearray(bytes((30, 22, 20, 255)) * (width * height))
+    if splash:
+        art = splash_bgra(('ECHO ARCADE', 'DOCKED'))
+        for y in range(TEX_H):
+            start = ((POSTER_Y0 + y) * width + POSTER_X0) * 4
+            px[start:start + TEX_W * 4] = art[y * TEX_W * 4:(y + 1) * TEX_W * 4]
     return bytes(px)
 
 
@@ -198,12 +201,13 @@ def build():
     struct.pack_into('<4f', row, 0x90, 0, 0, 1, 1)
     status = page.label(donor.elements[1], 'echo_arcade_status_v1', 'STARTING ARCADE...',
                         (0, PAGE_H - 34, PAGE_W, PAGE_H), 18, hidden=True, capacity=96)
-    # Never drawn: holds the poster texture for as long as the tablet exists (DOCK).
-    keepalive = page.append(sprite_template, 'echo_arcade_poster_keepalive_v1', (0, 0, 1, 1), hidden=True)
-    row = page.elements[keepalive]
-    struct.pack_into('<4f', row, 0x78, 1, 1, 1, 1)
-    struct.pack_into('<Q', row, 0x88, POSTER_TEXTURE)
-    struct.pack_into('<4f', row, 0x90, 0, 0, 1, 1)
+    # Never drawn: hold the poster textures for as long as the tablet exists (DOCK).
+    for name, texture in (('echo_arcade_poster_keepalive_v1', POSTER_TEXTURE), ('echo_arcade_poster_turned_keepalive_v1', POSTER_TURNED_TEXTURE)):
+        keepalive = page.append(sprite_template, name, (0, 0, 1, 1), hidden=True)
+        row = page.elements[keepalive]
+        struct.pack_into('<4f', row, 0x78, 1, 1, 1, 1)
+        struct.pack_into('<Q', row, 0x88, texture)
+        struct.pack_into('<4f', row, 0x90, 0, 0, 1, 1)
     # Local vertex/index budgets for RenderMT (same sizing rule as stock pages).
     struct.pack_into('<2I', page.header, 0x2c, 256, 384)
 
@@ -218,7 +222,7 @@ def build():
     for c in (root, nav, page):
         fix_texture_count(c)
         c.validate()
-    assert struct.unpack_from('<I', page.header, 0x28)[0] == 2 and struct.unpack_from('<I', nav.header, 0x28)[0] == 13
+    assert struct.unpack_from('<I', page.header, 0x28)[0] == 3 and struct.unpack_from('<I', nav.header, 0x28)[0] == 13  # screen + 2 keepalives
     assert [bytes(r) for r in root.elements[:7]] == old_root
     for i, (old, new) in enumerate(zip(old_nav, nav.elements[:9])):  # stock tabs: only their x position moved
         assert old[:0x34] == new[:0x34] and old[0x44:] == new[0x44:], f'nav element {i} changed beyond its rect'
@@ -272,6 +276,7 @@ def build():
     tex_cpu, tex_gpu = texture_pair(stock, TEX_W, TEX_H, splash_bgra())
     icon_cpu, icon_gpu = texture_pair(stock, icon_w, icon_h, icon_pixels)
     poster_cpu, poster_gpu = texture_pair(stock, POSTER_TEX_W, POSTER_TEX_H, poster_bgra())
+    turned_cpu, turned_gpu = texture_pair(stock, POSTER_TURNED_W, POSTER_TURNED_H, poster_bgra(POSTER_TURNED_W, POSTER_TURNED_H, splash=False))
     patcher.add_item('CUICanvasResource', False, f'0x{ROOT_CANVAS:016x}', root.serialize())
     patcher.add_item('CUICanvasResource', False, f'0x{NAV_CANVAS:016x}', nav.serialize())
     patcher.add_item('CUICanvasResource', False, f'0x{PAGE:016x}', page.serialize())
@@ -282,6 +287,8 @@ def build():
     patcher.add_item('CGTextureResource', True, f'0x{ICON_TEXTURE:016x}', icon_gpu)
     patcher.add_item('CGTextureResource', False, f'0x{POSTER_TEXTURE:016x}', poster_cpu)
     patcher.add_item('CGTextureResource', True, f'0x{POSTER_TEXTURE:016x}', poster_gpu)
+    patcher.add_item('CGTextureResource', False, f'0x{POSTER_TURNED_TEXTURE:016x}', turned_cpu)
+    patcher.add_item('CGTextureResource', True, f'0x{POSTER_TURNED_TEXTURE:016x}', turned_gpu)
     while (GAME_PACKAGES / f'{MID}_{patcher.mf.npkg}').exists():
         i = patcher.mf.npkg
         patcher.mf.C.append([i, (GAME_PACKAGES / f'{MID}_{i}').stat().st_size, 0, 0])
@@ -306,7 +313,8 @@ def build():
                 package=package_name, package_sha256=sha((OUT / 'packages' / package_name).read_bytes()),
                 page=f'{PAGE:016x}', texture=f'{TEXTURE:016x}', tab_button=f'{TAB_BUTTON:016x}', settings_button=f'{SETTINGS_BUTTON:016x}',
                 grid=[GRID_COLS, GRID_ROWS], texture_size=[TEX_W, TEX_H],
-                poster_texture=f'{POSTER_TEXTURE:016x}', poster_texture_size=[POSTER_TEX_W, POSTER_TEX_H])
+                poster_texture=f'{POSTER_TEXTURE:016x}', poster_texture_size=[POSTER_TEX_W, POSTER_TEX_H],
+                poster_turned_texture=f'{POSTER_TURNED_TEXTURE:016x}', poster_turned_texture_size=[POSTER_TURNED_W, POSTER_TURNED_H])
     (OUT / 'arcade_tab.json').write_text(json.dumps(meta, indent=2))
 
     GENERATED.mkdir(parents=True, exist_ok=True)
@@ -322,7 +330,7 @@ def build():
         f'constexpr unsigned ARCADE_PAGE_SCREEN={screen}, ARCADE_PAGE_STATUS={status};\n'
         f'constexpr unsigned ARCADE_GRID_COLS={GRID_COLS}, ARCADE_GRID_ROWS={GRID_ROWS};\n'
         f'constexpr unsigned ARCADE_TEX_W={TEX_W}, ARCADE_TEX_H={TEX_H};\n'
-        f'constexpr uint64_t ARCADE_POSTER_TEXTURE=0x{POSTER_TEXTURE:016x};\n'
+        f'constexpr uint64_t ARCADE_POSTER_TEXTURE=0x{POSTER_TEXTURE:016x}, ARCADE_POSTER_TURNED_TEXTURE=0x{POSTER_TURNED_TEXTURE:016x};\n'
         f'constexpr uint64_t ARCADE_CELLS[]={{{cells}}};\n')
     print(f'Built ARCADE tab: {len(patcher.items)} resources in {package_name}, '
           f'{GRID_COLS}x{GRID_ROWS} touch grid, {TEX_W}x{TEX_H} BGRA screen, {POSTER_TEX_W}x{POSTER_TEX_H} poster screen.')
