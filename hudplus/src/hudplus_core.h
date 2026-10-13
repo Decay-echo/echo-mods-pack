@@ -70,6 +70,14 @@ struct Settings {
     bool stun = true;
     float shieldGrace = 0.2f;     // s: a shield dropped this recently still counts as up
     float flashStrength = 0.85f;  // peak opacity of the flash, 0..1
+    // pass counter at the top of the view (from Echo's API): +1 for each pass inside a team,
+    // the count itself from passCountFrom passes, gone when the other team gets the disc;
+    // a goal shows the chain 50% bigger, flashing
+    bool passes = true;
+    bool passesMine = false;      // only your team's chains (default: either team's, in its colour)
+    int passCountFrom = 6;
+    float passPx = 26.f;          // box height, canvas px (three times as wide)
+    float passY = 0.075f;         // metres above eye level, at the HUD's distance
 };
 
 inline float clamp01(float v) { return v < 0 ? 0 : v > 1 ? 1 : v; }
@@ -251,15 +259,16 @@ inline float edgeGlowAlpha(const Settings& s, float speed) {
 }
 
 // ---- overlay image ------------------------------------------------------------------
-// One 1024x256 RGBA texture (sRGB, premultiplied alpha) holds every element; each quad
+// One 1024x384 RGBA texture (sRGB, premultiplied alpha) holds every element; each quad
 // layer shows its own viewport of it.
-constexpr int kTexW = 1024, kTexH = 256;
+constexpr int kTexW = 1024, kTexH = 384;
 struct Rect { int x, y, w, h; };
 constexpr Rect kGaugeRect[2] = {{0, 0, 128, 128}, {128, 0, 128, 128}};
 constexpr Rect kTextRect = {456, 0, 556, 232};  // the speeds box, at high resolution (~2.4:1)
 constexpr Rect kFlashRect = {4, 132, 120, 120};
 constexpr Rect kThrustRect[2] = {{136, 128, 128, 128}, {264, 128, 128, 128}};
 constexpr Rect kGlowRect[5] = {{260, 2, 60, 60}, {326, 2, 60, 60}, {392, 2, 60, 60}, {260, 66, 60, 60}, {326, 66, 60, 60}};
+constexpr Rect kPassRect = {0, 258, 378, 126};  // the pass counter (3:1)
 
 struct Color { float r, g, b; };  // linear 0..1
 constexpr Color kReady = {0.1f, 1.f, 0.25f}, kCharging = {1.f, 0.08f, 0.05f}, kGood = {1.f, 0.8f, 0.08f}, kTrack = {1.f, 1.f, 1.f};
@@ -284,11 +293,17 @@ inline uint8_t toSrgb(float linear) {
 struct Canvas {
     int w = kTexW, h = kTexH;
     std::vector<float> px = std::vector<float>(size_t(kTexW) * kTexH * 4, 0.f);  // linear premultiplied
+    mutable int dx0 = 0, dy0 = 0, dx1 = kTexW, dy1 = kTexH;  // changed since the last encode (all, at first)
+    void touch(int x0, int y0, int x1, int y1) {
+        dx0 = std::min(dx0, x0), dy0 = std::min(dy0, y0), dx1 = std::max(dx1, x1), dy1 = std::max(dy1, y1);
+    }
     void clear(const Rect& r) {
+        touch(r.x, r.y, r.x + r.w, r.y + r.h);
         for (int y = r.y; y < r.y + r.h; y++) std::fill(&px[(size_t(y) * w + r.x) * 4], &px[(size_t(y) * w + r.x + r.w) * 4], 0.f);
     }
     void over(int x, int y, Color c, float a) {  // premultiplied "over"
         if (a <= 0) return;
+        if (x < dx0 || x >= dx1 || y < dy0 || y >= dy1) touch(x, y, x + 1, y + 1);
         float* p = &px[(size_t(y) * w + x) * 4];
         float k = 1 - a;
         p[0] = c.r * a + p[0] * k;
@@ -296,20 +311,27 @@ struct Canvas {
         p[2] = c.b * a + p[2] * k;
         p[3] = a + p[3] * k;
     }
-    // RGBA8 bytes (sRGB-encoded premultiplied colour, linear alpha) for upload.
+    // RGBA8 bytes (sRGB-encoded premultiplied colour, linear alpha) for upload. `out` keeps
+    // the last encode: only the part drawn since then is encoded again.
     void encode(std::vector<uint8_t>& out) const {
         static const std::vector<uint8_t> lut = [] {  // linear in 1/4095 steps -> sRGB byte
             std::vector<uint8_t> t(4096);
             for (int i = 0; i < 4096; i++) t[i] = toSrgb(i / 4095.f);
             return t;
         }();
-        out.resize(size_t(w) * h * 4);
-        for (size_t i = 0; i < size_t(w) * h; i++) {
-            const float* p = &px[i * 4];
-            uint8_t a = uint8_t(clamp01(p[3]) * 255 + .5f);
-            for (int ch = 0; ch < 3; ch++) out[i * 4 + ch] = a ? lut[size_t(clamp01(p[ch]) * 4095 + .5f)] : 0;  // no light where it's clear
-            out[i * 4 + 3] = a;
+        if (out.size() != size_t(w) * h * 4) {
+            out.assign(size_t(w) * h * 4, 0);
+            dx0 = dy0 = 0, dx1 = w, dy1 = h;
         }
+        for (int y = std::max(dy0, 0); y < std::min(dy1, h); y++)
+            for (int x = std::max(dx0, 0); x < std::min(dx1, w); x++) {
+                size_t i = size_t(y) * w + x;
+                const float* p = &px[i * 4];
+                uint8_t a = uint8_t(clamp01(p[3]) * 255 + .5f);
+                for (int ch = 0; ch < 3; ch++) out[i * 4 + ch] = a ? lut[size_t(clamp01(p[ch]) * 4095 + .5f)] : 0;  // no light where it's clear
+                out[i * 4 + 3] = a;
+            }
+        dx0 = w, dy0 = h, dx1 = 0, dy1 = 0;
     }
 };
 
@@ -753,6 +775,33 @@ inline void drawSpeeds(Canvas& cv, const Rect& r, const char* current, const cha
     }
 }
 
+// The pass counter: "+1" (number 1, plus) or a number, centred, in Echo's digits and the
+// team colour; the plus sign is drawn (Echo's font file has only digits).
+inline void drawPassCounter(Canvas& cv, const Rect& r, int number, bool plus, Color c, float alpha, const DigitFont* font) {
+    cv.clear(r);
+    if (number <= 0 || alpha <= 0) return;
+    char digits[12];
+    snprintf(digits, sizeof digits, "%d", number);
+    const float cap = r.h * 0.6f, size = fontOk(font) ? cap / fontCap(*font, 1.f) : cap / 0.62f;
+    const float digitsW = textWidth(font, digits, size), plusW = plus ? cap * 0.78f : 0, gap = plus ? cap * 0.14f : 0;
+    const float left = (r.w - (plusW + gap + digitsW)) / 2, cy = r.h / 2.f;
+    // the digits, shifted right of the plus
+    Rect cell{r.x + int(left + plusW + gap), r.y, int(digitsW + 4), r.h};
+    cell.w = std::min(cell.w, r.x + r.w - cell.x);
+    drawLabel(cv, cell, digits, cap, c, alpha, font);
+    if (!plus) return;
+    const float arm = plusW / 2, half = cap * 0.075f, cx = left + arm;  // two round-ended bars
+    for (int y = int(cy - arm - 2); y <= int(cy + arm + 2); y++)
+        for (int x = int(cx - arm - 2); x <= int(cx + arm + 2); x++) {
+            if (x < 0 || y < 0 || x >= r.w || y >= r.h) continue;
+            float px = x + .5f, py = y + .5f;
+            float d = std::min(segDistance(px, py, cx - arm + half, cy, cx + arm - half, cy),
+                               segDistance(px, py, cx, cy - arm + half, cx, cy + arm - half));
+            float cov = clamp01(half - d + .5f);
+            if (cov > 0) cv.over(r.x + x, r.y + y, c, alpha * cov);
+        }
+}
+
 // Full-view vignette: tinted all over, strongest towards the edges.
 inline void drawFlash(Canvas& cv, const Rect& r, Color c, float alpha) {
     cv.clear(r);
@@ -857,6 +906,11 @@ inline float glowFill(const Settings& s, int k, float speed) {
     return hi > lo ? clamp01((speed - lo) / (hi - lo)) : (speed >= hi ? 1.f : 0.f);
 }
 inline Placement flashPlacement() { return {0, 0, 1.f, 3.4f, 3.4f}; }  // ~120 degrees at 1 m
+// The pass counter, centred at the top of the view; `scale` 1.5 for a goal.
+inline Placement passPlacement(const Settings& s, float scale) {
+    float h = s.passPx / s.pxPerMetre * scale;
+    return {0, s.passY, s.hudDistance, h * kPassRect.w / kPassRect.h, h};
+}
 
 // ---- D3D12 uploads --------------------------------------------------------------------
 struct ComRelease {

@@ -25,7 +25,15 @@ A new **Arcade** tab (gamepad icon) on Echo VR's hand tablet that runs **Balatro
 | Movies | Your video folders (`apps\movies` and Windows *Videos* by default) in mpv | Tap for controls: ±10/30 s, pause, seek bar, volume, subtitles, audio track |
 | YouTube | The YouTube page open in your browser on the PC, shown on the tablet (its sound stays the browser's). Skippable ads are skipped for you as soon as YouTube offers the Skip button. With yt-dlp in `apps\mpv` (optional): also search and saved links / mixes (`apps\youtube.txt`) played in mpv | Like YouTube on a tablet: tap anything on the page, slide to scroll. Toolbar: BACK, HOME, SEARCH (on-screen keyboard into YouTube's search box), PREV, PLAY/PAUSE, NEXT, CLOSE. Taps and scrolling are posted to the browser window, so the cursor never moves and Echo VR keeps focus |
 
-Tap **≡** (Balatro) or **HOME** (RetroArch) for Resume / Quit to launcher / Dock. The **gear** tab is **Settings**: tablet size (0.5x to 4x, applied live; experimental), saved to `echo_tweaks.ini`. It resizes the tablet's screens (the canvases and their touch areas), not the tablet's 3D body, which stays stock size. The view (FOV) is not on the tablet: set it in `echo_tweaks.ini` (below).
+Tap **≡** (Balatro) or **HOME** (RetroArch) for Resume / Quit to launcher / Dock. The **gear** tab is **Settings**, one page per mod. Changes apply right away (the HUD and the disc button read their files again within a second); only the visor lines wait for Echo's next start.
+
+- **TABLET**: tablet size (0.5x to 4x, live; experimental: it resizes the tablet's screens and touch areas, not its 3D body), AUTO DOCK, and how FREEZE maps A/B/X/Y (by place like an Xbox pad, or by name).
+- **HUD** (when EchoHudPlus is installed): the HUD itself, the speeds, the speed size, the mute/network icons, the pass counter (off / my team / both teams) and the old gauges.
+- **SCREEN**: the thruster glow (on/off, brightness, the speed it starts above), the stun flash, and hiding Echo's visor lines (HUD lines, from the next start).
+- **DISC** (when DiscButton is installed): the summon button (A, B, X, Y or OFF) and whether Echo still sees it.
+- **NORMAL**: **ALL OFF** switches every one of those back to Echo's normal at once (tablet size 1x, no auto dock, no HUD, glow, visor-line patch or disc button) and remembers what was on: the same button then says **ALL BACK ON**. **NORMAL TABLET** (tap twice) does ALL OFF and takes Echo Arcade off the tablet when you close Echo VR (with the Echo Mods Pack: the HUD and HUD lines too). `tools/remove_on_exit.py` waits for Echo to close, then runs the uninstall and says so in a message box; tap **CANCEL** before then to keep it. INSTALL brings it all back as it was.
+
+Saved in `echo_tweaks.ini` (tablet), `plugins\EchoHudPlus\settings.ini`, `plugins\DiscButton\settings.ini` and `asset_patches\manifest.json`. The view (FOV) is not on the tablet: set it in `echo_tweaks.ini` (below).
 
 ### FREEZE: play RetroArch with your Touch controllers
 

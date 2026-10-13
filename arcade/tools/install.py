@@ -190,6 +190,8 @@ def write_ini(target: Path):
     apps = ROOT / 'apps'
     ini = f"""; Echo Arcade host configuration (written by tools/install.py)
 [paths]
+; this folder (the tablet's NORMAL TABLET runs tools\\remove_on_exit.py from it)
+root={ROOT}
 love={apps / 'love/love-11.5-win64/love.exe'}
 balatro_steam={apps / 'balatro/steam'}
 retroarch={apps / 'retroarch/retroarch.exe'}
@@ -277,6 +279,77 @@ def check_echoloader(p):
     return False
 
 
+def ini_get(text: str, section: str, key: str):
+    """A key's value in ini text (None if missing); keys and sections any case, like Windows."""
+    current = None
+    for line in text.splitlines():
+        s = line.strip()
+        if s.startswith('[') and s.endswith(']'):
+            current = s[1:-1].strip().lower()
+        elif current == section.lower() and '=' in s and not s.startswith(';'):
+            k, _, v = s.partition('=')
+            if k.strip().lower() == key.lower():
+                return v.strip()
+    return None
+
+
+def ini_set(text: str, section: str, key: str, value: str):
+    """The ini text with section/key set (added if missing); comments and everything else kept."""
+    lines, current, done, last_in_section = text.splitlines(), None, False, None
+    for i, line in enumerate(lines):
+        s = line.strip()
+        if s.startswith('[') and s.endswith(']'):
+            current = s[1:-1].strip().lower()
+            if current == section.lower():
+                last_in_section = i
+        elif current == section.lower():
+            last_in_section = i if s else last_in_section
+            k, eq, _ = s.partition('=')
+            if eq and not s.startswith(';') and k.strip().lower() == key.lower():
+                lines[i] = f'{key}={value}'
+                done = True
+    if not done:
+        if last_in_section is None:
+            lines += ['', f'[{section}]', f'{key}={value}']
+        else:
+            lines.insert(last_in_section + 1, f'{key}={value}')
+    return '\n'.join(lines) + '\n'
+
+
+def ini_drop_section(text: str, section: str):
+    out, skip = [], False
+    for line in text.splitlines():
+        s = line.strip()
+        if s.startswith('[') and s.endswith(']'):
+            skip = s[1:-1].strip().lower() == section.lower()
+        if not skip:
+            out.append(line)
+    return '\n'.join(out).rstrip('\n') + '\n'
+
+
+def undo_everything_off(p, target: Path):
+    """The tablet's ALL OFF / NORMAL TABLET saved what was on in echo_tweaks.ini [before_off]:
+    a new install puts it all back (the HUD lines are switched on by their own installer)."""
+    text = target.read_text(encoding='utf-8', errors='replace')
+    text = ini_set(text, 'normal', 'remove_on_exit', '0') if ini_get(text, 'normal', 'remove_on_exit') else text
+    if ini_get(text, 'before_off', 'saved') != '1':
+        target.write_text(text, encoding='utf-8')
+        return
+    scale, dock = ini_get(text, 'before_off', 'tablet_scale'), ini_get(text, 'before_off', 'auto_dock')
+    if scale:
+        text = ini_set(text, 'tablet', 'scale', scale)
+    if dock:
+        text = ini_set(text, 'dock', 'auto', dock)
+    for name, section, key, value in (('EchoHudPlus', 'general', 'enabled', ini_get(text, 'before_off', 'hud')),
+                                      ('DiscButton', 'summon', 'button', ini_get(text, 'before_off', 'disc_button'))):
+        ini = p['plugins'] / name / 'settings.ini'
+        if value and ini.exists():
+            ini.write_text(ini_set(ini.read_text(encoding='utf-8', errors='replace'), section, key, value), encoding='utf-8')
+            print(f'{name}: {section} {key}={value} again (as before ALL OFF on the tablet)')
+    target.write_text(ini_drop_section(text, 'before_off'), encoding='utf-8')
+    print('Put back what the tablet\'s ALL OFF had switched off (tablet size, auto dock).')
+
+
 def write_tweaks(p):
     """echo_tweaks.ini is yours to edit: created once, never overwritten.
 
@@ -284,12 +357,13 @@ def write_tweaks(p):
     EchoVR-Haptics' haptics_config.txt if that is present.
     """
     target = p['plugins'] / 'EchoArcade' / 'echo_tweaks.ini'
-    if target.exists():
+    if target.exists():  # an update: the tablet is still there to switch things back on
         return
     saved = sorted((ROOT / 'backups').glob('*/echo_tweaks.ini')) if (ROOT / 'backups').exists() else []
     if saved:
         shutil.copy2(saved[-1], target)
         print(f'Restored your settings file {target.name} from {saved[-1].parent.name}')
+        undo_everything_off(p, target)
         return
     x = y = 1.0
     old = p['bin'] / 'haptics_config.txt'

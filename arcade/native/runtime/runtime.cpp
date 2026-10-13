@@ -442,7 +442,8 @@ void initialize() {
     job = CreateJobObjectW(nullptr, nullptr);
     if (job) {
         JOBOBJECT_EXTENDED_LIMIT_INFORMATION info{};
-        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        // Breakaway allowed: the tablet's NORMAL TABLET helper has to outlive Echo (it uninstalls after).
+        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_BREAKAWAY_OK;
         SetInformationJobObject(job, JobObjectExtendedLimitInformation, &info, sizeof(info));
     }
     MH_STATUS init = MH_Initialize();

@@ -15,9 +15,10 @@ import sys
 HERE = Path(__file__).resolve().parent
 ENTRY = 'EchoHudPlus.dll'
 OLD_ENTRY = 'EchoCrosshair.dll'  # the centre dot this replaced
-SETTINGS = """; EchoHudPlus: wrist thruster gauges with your mute icon and connection bars, the
-; last-speed number, and the stun flash, at the bottom of your view with Echo's speed.
-; Restart Echo VR after changes. Positions are in readout pixels from the centre of
+SETTINGS = """; EchoHudPlus: your speed and last-run speed with your mute icon and connection bars at
+; the bottom of your view, the screen glow, the stun flash, and the pass counter at the top.
+; Changes apply while Echo runs (within a second); most are also on the arcade tablet's
+; SETTINGS tab. Positions are in readout pixels from the centre of
 ; Echo's speed (512 px = 1 m at the readout's distance): x out to each side, y down
 ; (negative = up).
 [general]
@@ -104,6 +105,18 @@ enabled=1
 shield_grace_ms=200
 ; flash opacity 0.05 .. 1
 strength=0.85
+
+[passes]
+; at the top of your view: "+1" each time the disc goes to a teammate, the count itself from
+; count_from passes on, gone when the other team gets it; a goal shows the chain 50% bigger,
+; flashing. Reads Echo's own API: Echo's Settings > Game > API access must be on.
+enabled=1
+; both = either team's passes (each in its colour), mine = only your team's
+teams=both
+count_from=6
+; box height (readout px) and how far above eye level (metres)
+size_px=26
+y_m=0.075
 """
 
 spec = importlib.util.spec_from_file_location('patcher', HERE.parent / 'echo_game.py')  # find the game, is it running
@@ -157,6 +170,24 @@ def main():
         shutil.copy2(settings, settings.with_suffix('.ini.old'))
     if args.reset_settings or not settings.exists():
         settings.write_text(SETTINGS, encoding='utf-8')
+    else:
+        text = settings.read_text(encoding='utf-8', errors='replace')
+        lines = text.splitlines()
+        section, changed = '', False
+        for i, line in enumerate(lines):  # installing means you want it: switched back on
+            s = line.strip()
+            if s.startswith('['):
+                section = s.lower()
+            elif section == '[general]' and s.replace(' ', '').lower() == 'enabled=0':
+                lines[i], changed = 'enabled=1', True
+        if changed:
+            print('The HUD was switched off in settings.ini (or by the tablet\'s ALL OFF): switched back on')
+        if '[passes]' not in text.lower():  # new in this version: its section, with the explanation
+            lines += [''] + SETTINGS[SETTINGS.index('[passes]'):].rstrip('\n').splitlines()
+            changed = True
+            print('Added the pass counter settings ([passes]) to settings.ini')
+        if changed:
+            settings.write_text('\n'.join(lines) + '\n', encoding='utf-8')
     digits = HERE / 'data' / 'echo_digits.bin'
     if digits.is_file():
         shutil.copy2(digits, settings.parent / 'digits.bin')

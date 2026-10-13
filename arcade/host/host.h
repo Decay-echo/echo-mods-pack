@@ -29,6 +29,7 @@ std::wstring localAppData();  // %LOCALAPPDATA%, even when the variable is missi
 // ---- configuration (EchoArcade\arcade.ini, written by the installer) ----
 struct Config {
     std::wstring dir;                 // folder containing ArcadeHost.exe
+    std::wstring root;                // the Echo Arcade folder it was installed from (tools, .venv)
     std::wstring love;                // love.exe (11.5)
     std::wstring balatroSteam;        // prepared Steam game folder (extracted + bridge)
     std::wstring retroarch;           // retroarch.exe

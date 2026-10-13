@@ -14,6 +14,9 @@
 //    top speed of your last run at or above 10 m/s, held until the next run replaces it.
 //  * Stun flash: when you get stunned, a green flash if your shield was up on your side
 //    (or dropped within shield_grace_ms), red if it wasn't.
+//  * Pass counter at the top: "+1" each time the disc goes to a teammate, the count itself
+//    from the 6th pass, gone when the other team gets it; a goal shows the chain 50% bigger,
+//    flashing. From Echo's own API (127.0.0.1:6721, Settings > Game > API access).
 //
 // Game data comes from three hooks in echovr.exe (see game_memory.h), each enabled only
 // if the code at that address is exactly what it was written for. The overlay is one
@@ -22,15 +25,20 @@
 // If the runtime ever rejects a frame with them, that frame is resubmitted without
 // them and the overlay turns off for the session (see the log).
 //
-// Settings: plugins\EchoHudPlus\settings.ini   Log: %LOCALAPPDATA%\EchoHudPlus\hudplus.log
+// Settings: plugins\EchoHudPlus\settings.ini (re-read when it changes: the arcade tablet's
+// SETTINGS page writes it)   Log: %LOCALAPPDATA%\EchoHudPlus\hudplus.log
 #include "hudplus_core.h"
 #include "game_memory.h"
+#include "passes.h"
 #include "../discbutton/minhook/include/MinHook.h"
 #include <cstdarg>
 #include <cstdio>
+#include <atomic>
 #include <mutex>
 #include <share.h>
 #include <string>
+#include <winhttp.h>
+#pragma comment(lib, "winhttp.lib")
 
 namespace {
 
@@ -103,6 +111,8 @@ struct State {
     double voiceAt = -1;  // when the voice hook last found your entry
     Flash flash;
     RollingMax peak;  // top speed over the last few seconds
+    PassCounter passes;
+    int apiTeam = -1;  // your team, as the API sees it (for teams=mine)
 } state;
 
 uintptr_t batteryVtable = 0;
@@ -254,6 +264,69 @@ void observeStun(void* punchableSystem, uint32_t id, float seconds) {
     }
 }
 
+// ---- pass counter: Echo's API, polled on its own thread -------------------------------
+std::atomic<bool> passesWanted{false};  // set by the render thread: HUD and pass counter on
+#ifdef HUDPLUS_TEST
+std::atomic<int> apiPort{6721};
+#else
+constexpr int apiPort = 6721;
+#endif
+
+// GET http://127.0.0.1:6721/session. False if the API isn't answering (off, or not in a match).
+bool fetchSession(HINTERNET http, std::string& body) {
+    HINTERNET connection = WinHttpConnect(http, L"127.0.0.1", INTERNET_PORT(int(apiPort)), 0);
+    if (!connection) return false;
+    HINTERNET request = WinHttpOpenRequest(connection, L"GET", L"/session", nullptr, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, 0);
+    bool ok = request && WinHttpSendRequest(request, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0) &&
+              WinHttpReceiveResponse(request, nullptr);
+    DWORD status = 0, size = sizeof status;
+    ok = ok && WinHttpQueryHeaders(request, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_HEADER_NAME_BY_INDEX, &status, &size,
+                                   WINHTTP_NO_HEADER_INDEX) && status == 200;
+    body.clear();
+    for (DWORD got = 0; ok; ) {
+        char buf[8192];
+        if (!WinHttpReadData(request, buf, sizeof buf, &got)) { ok = false; break; }
+        if (got == 0) break;
+        body.append(buf, got);
+        if (body.size() > (1 << 20)) { ok = false; break; }
+    }
+    if (request) WinHttpCloseHandle(request);
+    WinHttpCloseHandle(connection);
+    return ok;
+}
+
+DWORD WINAPI pollPasses(LPVOID) {
+    HINTERNET http = WinHttpOpen(L"EchoHudPlus", WINHTTP_ACCESS_TYPE_NO_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    if (!http) { logf("pass counter: WinHTTP unavailable (%lu)", GetLastError()); return 0; }
+    WinHttpSetTimeouts(http, 250, 250, 250, 500);
+    bool answering = true;  // for the log: say when the API stops / starts answering
+    int parseErrors = 0;
+    while (true) {
+        if (!passesWanted) {
+            Sleep(250);
+            continue;
+        }
+        std::string body;
+        Possession p;
+        bool got = fetchSession(http, body);
+        if (got) {
+            Json doc;
+            if (parseJson(body, doc)) p = readSession(doc);
+            else if (parseErrors++ < 3) logf("pass counter: unreadable /session answer (%zu bytes)", body.size());
+        }
+        if (got != answering) {
+            answering = got;
+            logf(got ? "pass counter: Echo's API answers" : "pass counter: no answer from Echo's API (not in a match, or API access off)");
+        }
+        {
+            std::lock_guard<std::mutex> g(stateLock);
+            state.passes.update(p, now());
+            state.apiTeam = p.myTeam;
+        }
+        Sleep(got ? 40 : 1000);  // 25 a second in a match; once a second otherwise
+    }
+}
+
 // ---- game hooks ------------------------------------------------------------------------
 // Each detour passes the original's return value back, in case a caller reads it.
 using BoostInputFn = uint64_t(__fastcall*)(void*, void*, float);
@@ -342,7 +415,8 @@ struct Overlay {
     double edgeAt = -1;
     int thrustKey[2] = {-2, -2};
     int glowKey[Settings::kRings] = {-2, -2, -2, -2, -2};
-    QuadLayer quads[11];
+    int passKey = -1;  // the key for "nothing shown" (the canvas starts clear)
+    QuadLayer quads[12];
 } ov;
 
 ovrResult __cdecl hookedCreate(Session session, IUnknown* d3d, const SwapChainDesc* desc, SwapChain* out) {
@@ -533,8 +607,60 @@ unsigned refresh(Session session, const QuadLayer** out) {
         n++;
     }
 
+    // pass counter at the top, in the colour of the team with the chain
+    passesWanted = settings.passes;
+    PassView pv = settings.passes ? passView(s.passes, t, settings.passCountFrom) : PassView{};
+    if (settings.passesMine && pv.team != s.apiTeam) pv = PassView{};
+    int passKey = -1;
+    if (pv.kind != PassView::None) {
+        int teamKey = pv.team == kTeamBlue ? 1 : pv.team == kTeamOrange ? 2 : 0;
+        passKey = ((pv.number * 2 + (pv.kind == PassView::Plus)) * 32 + int(pv.alpha * 24 + .5f)) * 4 + teamKey;
+    }
+    if (passKey != ov.passKey) {
+        drawPassCounter(ov.canvas, kPassRect, pv.number, pv.kind == PassView::Plus, teamColor(settings, pv.team), pv.alpha, &digitFont);
+        ov.passKey = passKey;
+        ov.dirty = true;
+    }
+    if (passKey >= 0) {
+        Placement p = passPlacement(settings, pv.scale);
+        buildQuad(ov.quads[n], headerSize, ov.chain, kPassRect, p.x, p.y, p.z, p.w, p.h);
+        out[n] = &ov.quads[n];
+        n++;
+    }
+
     if (ov.dirty) upload(session);  // on failure the previous image stays up and it retries next frame
     return n;
+}
+
+// ---- settings.ini, watched while Echo runs ----
+void readSettings(const std::wstring& ini);  // below, with the keys
+std::wstring settingsPath;
+FILETIME settingsStamp{};
+ULONGLONG settingsCheckedAt = 0;
+
+FILETIME stampOf(const std::wstring& path) {
+    WIN32_FILE_ATTRIBUTE_DATA a{};
+    return GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &a) ? a.ftLastWriteTime : FILETIME{};
+}
+
+// Once a second: if settings.ini changed (the tablet's SETTINGS page, or by hand), read it
+// again and redraw everything. Runs even while the HUD is switched off, so it can come back.
+void watchSettings() {
+    ULONGLONG now = GetTickCount64();
+    if (settingsPath.empty() || now - settingsCheckedAt < 1000) return;
+    settingsCheckedAt = now;
+    FILETIME stamp = stampOf(settingsPath);
+    if (CompareFileTime(&stamp, &settingsStamp) == 0) return;
+    settingsStamp = stamp;
+    readSettings(settingsPath);
+    ov.gaugeKey[0] = ov.gaugeKey[1] = ov.thrustKey[0] = ov.thrustKey[1] = -3;  // never a real key: redraw
+    for (int& k : ov.glowKey) k = -3;
+    ov.text = "\x01";
+    ov.textColor = -1;
+    ov.flashKey = -3;
+    ov.passKey = -3;
+    ov.dirty = true;
+    logf("settings.ini changed: reloaded (HUD %s)", enabled ? "on" : "off");
 }
 
 thread_local bool inSubmit = false;  // ovr_SubmitFrame may call ovr_EndFrame inside the runtime
@@ -545,15 +671,18 @@ struct SubmitGuard {
 };
 
 ovrResult submit(SubmitFn real, Session session, long long frame, const void* scale, const void* const* layers, unsigned count) {
-    if (inSubmit || !enabled || mode == Mode::Off || !layers || count == 0 || count > 5)
+    if (!inSubmit) watchSettings();
+    if (inSubmit || !enabled || mode == Mode::Off || !layers || count == 0 || count > 5) {
+        if (!inSubmit) passesWanted = false;
         return real(session, frame, scale, layers, count);
+    }
     SubmitGuard guard;
     if (mode == Mode::Waiting) prepare(session, layers, count);
     if (mode != Mode::Ready) return real(session, frame, scale, layers, count);
-    const QuadLayer* extra[11];
+    const QuadLayer* extra[12];
     unsigned n = refresh(session, extra);
     if (n == 0) return real(session, frame, scale, layers, count);
-    const void* list[16];
+    const void* list[5 + 12];
     for (unsigned i = 0; i < count; i++) list[i] = layers[i];
     for (unsigned i = 0; i < n; i++) list[count + i] = extra[i]->bytes;
     ovrResult r = real(session, frame, scale, list, count + n);
@@ -580,6 +709,7 @@ ovrResult __cdecl hookedEndFrame(Session s, long long f, const void* v, const vo
 
 // ---- settings and start-up ---------------------------------------------------------------
 void readSettings(const std::wstring& ini) {
+    settings = Settings{};  // keys missing from the file go back to their defaults
     auto f = [&](const wchar_t* section, const wchar_t* key, float fallback, float lo, float hi) {
         wchar_t buf[32];
         GetPrivateProfileStringW(section, key, L"", buf, 32, ini.c_str());
@@ -652,6 +782,12 @@ void readSettings(const std::wstring& ini) {
     s.stun = b(L"stun", L"enabled", s.stun);
     s.shieldGrace = f(L"stun", L"shield_grace_ms", s.shieldGrace * 1000, 0.f, 2000.f) / 1000;
     s.flashStrength = f(L"stun", L"strength", s.flashStrength, 0.05f, 1.f);
+    s.passes = b(L"passes", L"enabled", s.passes);
+    GetPrivateProfileStringW(L"passes", L"teams", L"both", buf, 64, ini.c_str());
+    s.passesMine = _wcsicmp(buf, L"mine") == 0;
+    s.passCountFrom = int(f(L"passes", L"count_from", float(s.passCountFrom), 1.f, 99.f));
+    s.passPx = f(L"passes", L"size_px", s.passPx, 4.f, 200.f);
+    s.passY = f(L"passes", L"y_m", s.passY, -1.f, 1.f);
 }
 
 void loadDigits(const std::wstring& path) {
@@ -673,13 +809,16 @@ DWORD WINAPI install(LPVOID pluginPath) {
     std::wstring dir = static_cast<const wchar_t*>(pluginPath);
     delete[] static_cast<wchar_t*>(pluginPath);
     dir.resize(dir.find_last_of(L"\\/"));
-    readSettings(dir + L"\\EchoHudPlus\\settings.ini");
+    settingsPath = dir + L"\\EchoHudPlus\\settings.ini";
+    settingsStamp = stampOf(settingsPath);
+    readSettings(settingsPath);
     loadDigits(dir + L"\\EchoHudPlus\\digits.bin");
-    logf("EchoHudPlus starting (pid %lu), enabled=%d", GetCurrentProcessId(), enabled);
-    if (!enabled) return 0;
+    logf("EchoHudPlus starting (pid %lu), enabled=%d%s", GetCurrentProcessId(), enabled,
+         enabled ? "" : " (hooks go in anyway, so it can be switched on while Echo runs)");
     MH_STATUS init = MH_Initialize();
     if (init != MH_OK && init != MH_ERROR_ALREADY_INITIALIZED) { logf("MinHook init failed; overlay off"); return 0; }
     hookGame();
+    if (HANDLE poller = CreateThread(nullptr, 0, pollPasses, nullptr, 0, nullptr)) CloseHandle(poller);
     // Must be in place before the game creates its eye textures, so poll tightly.
     HMODULE ovr = nullptr;
     for (int i = 0; i < 60000 && !ovr; i++) {
@@ -721,6 +860,7 @@ extern "C" __declspec(dllexport) void hudplus_test_voice(void* voipSystem) { obs
 extern "C" __declspec(dllexport) void hudplus_test_stun(void* punchableSystem, uint32_t id, float seconds) {
     observeStun(punchableSystem, id, seconds);
 }
+extern "C" __declspec(dllexport) void hudplus_test_api_port(int port) { apiPort = port; }
 #endif
 
 // EchoLoader calls PluginInit only for entries with "args"; DllMain covers the rest.

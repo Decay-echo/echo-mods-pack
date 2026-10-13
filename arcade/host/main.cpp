@@ -2,6 +2,7 @@
 // Owns the tablet UI (launcher, browsers, touch controls) and the running app;
 // exits when Echo VR goes away.
 #include "apps.h"
+#include "mod_settings.h"
 #include "touchpad.h"
 #include <winrt/base.h>
 #include <algorithm>
@@ -86,6 +87,7 @@ public:
         readPos_ = shared_->touchWrite;
         apps_ = listApps(config_);
         loadSettings();
+        buildPages();
         shared_->hostPid = LONG(GetCurrentProcessId());
     }
 
@@ -786,76 +788,452 @@ private:
     }
 
     // ------------------------------------------------ SETTINGS tab
-    // Saved in echo_tweaks.ini beside the host, which the plugin reads when Echo starts.
-    struct Setting { const wchar_t* label; const wchar_t* section; const wchar_t* key; float min, max, step, value; };
-    std::wstring tweaksPath() const {
-        wchar_t path[MAX_PATH];
-        GetModuleFileNameW(nullptr, path, MAX_PATH);
-        std::wstring p = path;
-        return p.substr(0, p.find_last_of(L"\\/")) + L"\\echo_tweaks.ini";
+    // Every switch of the mods, a page each. The tablet's own live in echo_tweaks.ini beside the
+    // host (the plugin reads it when Echo starts; the tablet size also live). The HUD
+    // (plugins\EchoHudPlus\settings.ini) and the disc button (plugins\DiscButton\settings.ini)
+    // read their file again within a second. The HUD lines are NvrAssetPatches' manifest.json
+    // entries, read when Echo starts. NORMAL turns all of it off at once (and back on), and can
+    // take Echo Arcade off the tablet when Echo closes (tools\remove_on_exit.py).
+    enum class Kind { Slider, Toggle, Choice, Action };
+    struct Option {
+        std::wstring label, note;
+        Kind kind = Kind::Toggle;
+        float min = 0, max = 1, step = 1;          // Slider
+        const wchar_t* format = L"%.2f";           // Slider value
+        std::vector<std::wstring> choices;         // Choice: value = index
+        std::function<float()> get;
+        std::function<void(float)> set;
+        std::function<std::wstring(float)> text;   // Action: the button's label for a value
+        float value = 0;
+    };
+    struct Page { std::wstring name; std::vector<Option> options; std::wstring footer; };
+    static constexpr int SETTING_ROWS = 6, SETTING_Y = 148, SETTING_H = 64;
+
+    std::wstring tweaksPath() const { return config_.dir + L"\\echo_tweaks.ini"; }
+    static std::wstring parent(const std::wstring& path) { return path.substr(0, path.find_last_of(L"\\/")); }
+    std::wstring pluginsDir() const { return parent(config_.dir); }
+    std::wstring gameDir() const { return parent(parent(parent(pluginsDir()))); }  // plugins < win10 < bin < game
+    std::wstring hudIni() const { return pluginsDir() + L"\\EchoHudPlus\\settings.ini"; }
+    std::wstring discIni() const { return pluginsDir() + L"\\DiscButton\\settings.ini"; }
+    std::wstring manifestPath() const { return parent(pluginsDir()) + L"\\asset_patches\\manifest.json"; }
+    static bool exists(const std::wstring& path) { return GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES; }
+
+    static std::wstring iniText(const std::wstring& file, const wchar_t* section, const wchar_t* key, const wchar_t* fallback) {
+        wchar_t buf[64];
+        GetPrivateProfileStringW(section, key, fallback, buf, 64, file.c_str());
+        return buf;
     }
+    static float iniFloat(const std::wstring& file, const wchar_t* section, const wchar_t* key, float fallback) {
+        std::wstring v = iniText(file, section, key, L"");
+        return v.empty() ? fallback : float(_wtof(v.c_str()));
+    }
+    static void iniWrite(const std::wstring& file, const wchar_t* section, const wchar_t* key, const std::wstring& value) {
+        if (!WritePrivateProfileStringW(section, key, value.c_str(), file.c_str()))
+            hostLog("settings: could not write [%ls] %ls in %ls (error %lu)", section, key, file.c_str(), GetLastError());
+    }
+    static std::wstring num(float v, const wchar_t* format = L"%.2f") {
+        wchar_t buf[32];
+        swprintf(buf, 32, format, v);
+        return buf;
+    }
+    static bool readFile(const std::wstring& path, std::string& out) {
+        FILE* f = nullptr;
+        if (_wfopen_s(&f, path.c_str(), L"rb") != 0 || !f) return false;
+        char buf[65536];
+        size_t n;
+        out.clear();
+        while ((n = fread(buf, 1, sizeof(buf), f)) > 0) out.append(buf, n);
+        fclose(f);
+        return true;
+    }
+
+    // HUD lines: -1 not installed, 0 off, 1 on.
+    int hudLinesState() const {
+        std::string json;
+        return readFile(manifestPath(), json) ? mods::hudLinesState(json) : -1;
+    }
+    bool setHudLines(bool on) {
+        std::string json;
+        if (!readFile(manifestPath(), json)) return false;
+        std::string changed = mods::setHudLines(json, on);
+        if (changed == json) return true;
+        std::wstring tmp = manifestPath() + L".arcade-tmp";
+        FILE* f = nullptr;
+        bool ok = _wfopen_s(&f, tmp.c_str(), L"wb") == 0 && f && fwrite(changed.data(), 1, changed.size(), f) == changed.size();
+        if (f) fclose(f);
+        ok = ok && MoveFileExW(tmp.c_str(), manifestPath().c_str(), MOVEFILE_REPLACE_EXISTING);
+        if (!ok) { hostLog("settings: could not write manifest.json (error %lu)", GetLastError()); DeleteFileW(tmp.c_str()); }
+        else hostLog("settings: HUD lines %s (from the next start)", on ? "on" : "off");
+        return ok;
+    }
+
+    static Option toggle(std::wstring label, std::wstring note, std::wstring file, const wchar_t* section, const wchar_t* key, bool fallback) {
+        Option o{label, note, Kind::Toggle};
+        o.get = [=] { return iniFloat(file, section, key, fallback ? 1.f : 0.f) != 0 ? 1.f : 0.f; };
+        o.set = [=](float v) { iniWrite(file, section, key, v != 0 ? L"1" : L"0"); };
+        return o;
+    }
+    static Option slider(std::wstring label, std::wstring note, std::wstring file, const wchar_t* section, const wchar_t* key,
+                         float min, float max, float step, float fallback, const wchar_t* format) {
+        Option o{label, note, Kind::Slider, min, max, step, format};
+        o.get = [=] { return std::clamp(iniFloat(file, section, key, fallback), min, max); };
+        o.set = [=](float v) { iniWrite(file, section, key, num(v, step >= 1 ? L"%.0f" : step >= .1f ? L"%.1f" : L"%.2f")); };
+        return o;
+    }
+
     void loadSettings() {
-        // FOV is not here on purpose: it is set by hand in echo_tweaks.ini [fov].
-        settings_ = {{L"TABLET SIZE", L"tablet", L"scale", .5f, 4.f, .05f, 1.f}};
-        for (auto& s : settings_) {
-            wchar_t buf[32];
-            GetPrivateProfileStringW(s.section, s.key, L"1.0", buf, 32, tweaksPath().c_str());
-            s.value = std::clamp(float(_wtof(buf)), s.min, s.max);
+        std::wstring t = tweaksPath();
+        shared_->tabletScale = LONG(std::clamp(iniFloat(t, L"tablet", L"scale", 1.f), .5f, 4.f) * 1000);
+        autoDock_ = GetPrivateProfileIntW(L"dock", L"auto", 1, t.c_str()) != 0;  // on unless turned off
+        std::wstring buttons = iniText(t, L"freeze", L"buttons", L"");          // the tablet's choice beats arcade.ini
+        if (!buttons.empty()) config_.freezeButtons = buttons;
+        if (removalScheduled()) startRemover(true);  // its helper went away (PC restarted?): again
+    }
+
+    void buildPages() {
+        pages_.clear();
+        std::wstring tweaks = tweaksPath(), hud = hudIni(), disc = discIni();
+        bool hasHud = exists(hud);
+
+        Page tablet{L"TABLET"};
+        Option size = slider(L"Tablet size", L"The hand tablet, bigger or smaller", tweaks, L"tablet", L"scale", .5f, 4.f, .05f, 1.f, L"%.2fx");
+        size.set = [this](float v) { setTabletScale(v); };
+        tablet.options.push_back(size);
+        Option dock{L"Auto dock", L"The arcade goes on the lobby posters near you", Kind::Toggle};
+        dock.get = [this] { return autoDock_ ? 1.f : 0.f; };
+        dock.set = [this](float v) { if ((v != 0) != autoDock_) dockTapped(); };
+        tablet.options.push_back(dock);
+        Option buttons{L"FREEZE buttons", L"Touch A B X Y on the game pad: by place (like an Xbox pad) or by name", Kind::Choice};
+        buttons.choices = {L"BY PLACE", L"BY NAME"};
+        buttons.get = [this] { return config_.freezeButtons == L"labels" ? 1.f : 0.f; };
+        buttons.set = [this, tweaks](float v) {
+            config_.freezeButtons = v != 0 ? L"labels" : L"position";
+            iniWrite(tweaks, L"freeze", L"buttons", config_.freezeButtons);
+        };
+        tablet.options.push_back(buttons);
+        tablet.footer = L"View (FOV) is set in echo_tweaks.ini.";
+        pages_.push_back(tablet);
+
+        if (hasHud) {
+            Page p{L"HUD"};
+            p.options.push_back(toggle(L"HUD", L"Everything at the bottom of your view, and the screen effects", hud, L"general", L"enabled", true));
+            p.options.push_back(toggle(L"Speeds", L"Your speed, and your last run's top speed under it", hud, L"speed", L"enabled", true));
+            p.options.push_back(slider(L"Speed size", L"How big your current speed is", hud, L"speed", L"current_font_px", 12, 36, 1, 20, L"%.0f"));
+            p.options.push_back(toggle(L"Mute + network icons", L"Either side of the speeds", hud, L"thrusters", L"icons", true));
+            Option passes{L"Pass counter", L"Top of your view: +1 a pass, the count from 6, big on a goal", Kind::Choice};
+            passes.choices = {L"OFF", L"MY TEAM", L"BOTH"};
+            passes.get = [hud] {
+                if (iniFloat(hud, L"passes", L"enabled", 1) == 0) return 0.f;
+                return _wcsicmp(iniText(hud, L"passes", L"teams", L"both").c_str(), L"mine") == 0 ? 1.f : 2.f;
+            };
+            passes.set = [hud](float v) {
+                iniWrite(hud, L"passes", L"enabled", v != 0 ? L"1" : L"0");
+                if (v != 0) iniWrite(hud, L"passes", L"teams", v == 1 ? L"mine" : L"both");
+            };
+            p.options.push_back(passes);
+            Option gauges{L"Gauges", L"The old thruster rings, speed rings and 7 s top speed", Kind::Toggle};
+            gauges.get = [hud] {
+                return iniFloat(hud, L"thrusters", L"rings", 0) != 0 || iniFloat(hud, L"speed", L"ring", 0) != 0 ||
+                    iniFloat(hud, L"speed", L"top_speed", 0) != 0 ? 1.f : 0.f;
+            };
+            gauges.set = [hud](float v) {
+                const wchar_t* s = v != 0 ? L"1" : L"0";
+                iniWrite(hud, L"thrusters", L"rings", s);
+                iniWrite(hud, L"speed", L"ring", s);
+                iniWrite(hud, L"speed", L"top_speed", s);
+            };
+            p.options.push_back(gauges);
+            pages_.push_back(p);
         }
-        shared_->tabletScale = LONG(settings_[0].value * 1000);
-        autoDock_ = GetPrivateProfileIntW(L"dock", L"auto", 1, tweaksPath().c_str()) != 0;  // on unless turned off
+
+        Page screen{L"SCREEN"};
+        if (hasHud) {
+            screen.options.push_back(toggle(L"Thruster glow", L"Your view's edges glow in your team colour when your hands line up",
+                                            hud, L"thrusters", L"screen_glow", true));
+            screen.options.push_back(slider(L"Glow brightness", L"At full speed", hud, L"thrusters", L"screen_glow_peak", .1f, 1, .05f, .55f, L"%.2f"));
+            Option from = slider(L"Glow starts above", L"m/s: nothing at or under it, full 1.3 faster",
+                                 hud, L"thrusters", L"screen_glow_from", 1, 8, .1f, 3.5f, L"%.1f");
+            from.set = [hud](float v) {
+                iniWrite(hud, L"thrusters", L"screen_glow_from", num(v, L"%.1f"));
+                iniWrite(hud, L"thrusters", L"screen_glow_to", num(v + 1.3f, L"%.1f"));
+            };
+            screen.options.push_back(from);
+            screen.options.push_back(toggle(L"Stun flash", L"Green or red when you're stunned (green: your shield was up)", hud, L"stun", L"enabled", true));
+        }
+        if (hudLinesState() >= 0) {
+            Option lines{L"Hide Echo's visor lines", L"With Echo's own speed and icons. From the next time Echo starts", Kind::Toggle};
+            lines.get = [this] { return hudLinesState() > 0 ? 1.f : 0.f; };
+            lines.set = [this](float v) { setHudLines(v != 0); };
+            screen.options.push_back(lines);
+        }
+        if (!screen.options.empty()) pages_.push_back(screen);
+
+        if (exists(disc)) {
+            static const wchar_t* const names[5] = {L"A", L"B", L"X", L"Y", L"OFF"};
+            Page p{L"DISC"};
+            Option button{L"Summon disc button", L"Press it and your personal disc comes to your hand", Kind::Choice};
+            button.choices = std::vector<std::wstring>(names, names + 5);
+            button.get = [disc] {
+                std::wstring b = iniText(disc, L"summon", L"button", L"X");
+                for (int i = 0; i < 5; i++) if (_wcsicmp(b.c_str(), names[i]) == 0) return float(i);
+                return 2.f;
+            };
+            button.set = [disc](float v) { iniWrite(disc, L"summon", L"button", names[std::clamp(int(v), 0, 4)]); };
+            p.options.push_back(button);
+            p.options.push_back(toggle(L"Hide it from Echo", L"Echo doesn't see that button at all", disc, L"summon", L"hide_from_echo", false));
+            p.footer = L"The personal disc itself goes back with RESTORE.cmd in its own folder.";
+            pages_.push_back(p);
+        }
+
+        Page normal{L"NORMAL"};
+        Option off{L"Everything off", L"HUD, glow, visor lines, disc button, auto dock, tablet size", Kind::Action};
+        off.get = [this] { return allOff() ? 1.f : 0.f; };
+        off.set = [this](float v) { if (v != 0) allBackOn(); else everythingOff(); };
+        off.text = [](float v) { return std::wstring(v != 0 ? L"ALL BACK ON" : L"ALL OFF"); };
+        normal.options.push_back(off);
+        Option plain{L"Normal tablet", L"All off, and Echo Arcade leaves the tablet when you close Echo VR", Kind::Action};
+        plain.get = [this] { return removalScheduled() ? 2.f : armedUntil_ > GetTickCount64() ? 1.f : 0.f; };
+        plain.set = [this](float) { normalTabletTapped(); };
+        plain.text = [](float v) { return std::wstring(v == 2 ? L"CANCEL" : v == 1 ? L"TAP AGAIN: SURE?" : L"NORMAL TABLET"); };
+        normal.options.push_back(plain);
+        normal.footer = L"After NORMAL TABLET, INSTALL.cmd puts everything back.";
+        pages_.push_back(normal);
+
+        page_ = std::clamp(page_, 0, int(pages_.size()) - 1);
+        refreshOptions();
     }
-    void setSetting(size_t i, float v) {
-        auto& s = settings_[i];
-        v = std::clamp(std::round(v / s.step) * s.step, s.min, s.max);
-        if (std::fabs(v - s.value) < .001f) return;
-        s.value = v;
-        wchar_t buf[16];
-        swprintf(buf, 16, L"%.2f", v);
-        WritePrivateProfileStringW(s.section, s.key, buf, tweaksPath().c_str());
-        if (i == 0) shared_->tabletScale = LONG(v * 1000);
+    void refreshOptions() {
+        for (auto& p : pages_)
+            for (auto& o : p.options) o.value = o.get();
+        refreshedAt_ = GetTickCount64();
     }
-    static int settingY(size_t i) { return 96 + int(i) * 150; }
-    static Rect settingMinus(size_t i) { return {20, settingY(i) + 46, 110, settingY(i) + 116}; }
-    static Rect settingPlus(size_t i) { return {914, settingY(i) + 46, 1004, settingY(i) + 116}; }
-    static Rect settingTrack(size_t i) { return {140, settingY(i) + 66, 884, settingY(i) + 96}; }
+
+    void setTabletScale(float v) {
+        iniWrite(tweaksPath(), L"tablet", L"scale", num(v));
+        shared_->tabletScale = LONG(v * 1000);
+    }
+
+    // ---- NORMAL: everything off (what it was is kept in echo_tweaks.ini [before_off]) ----
+    bool allOff() const { return GetPrivateProfileIntW(L"before_off", L"saved", 0, tweaksPath().c_str()) != 0; }
+    void everythingOff() {
+        std::wstring t = tweaksPath(), hud = hudIni(), disc = discIni();
+        iniWrite(t, L"before_off", L"saved", L"1");
+        iniWrite(t, L"before_off", L"tablet_scale", num(iniFloat(t, L"tablet", L"scale", 1.f)));
+        iniWrite(t, L"before_off", L"auto_dock", autoDock_ ? L"1" : L"0");
+        if (exists(hud)) {
+            iniWrite(t, L"before_off", L"hud", iniText(hud, L"general", L"enabled", L"1"));
+            iniWrite(hud, L"general", L"enabled", L"0");
+        }
+        int lines = hudLinesState();
+        if (lines >= 0) {
+            iniWrite(t, L"before_off", L"hud_lines", lines > 0 ? L"1" : L"0");
+            setHudLines(false);
+        }
+        if (exists(disc)) {
+            iniWrite(t, L"before_off", L"disc_button", iniText(disc, L"summon", L"button", L"X"));
+            iniWrite(disc, L"summon", L"button", L"OFF");
+        }
+        if (autoDock_) dockTapped();
+        setTabletScale(1.f);
+        if (freeze_) stopFreeze(L"");
+        hostLog("settings: everything off");
+        message_ = L"Everything is off (Echo's own visor lines come back when Echo starts again).";
+    }
+    void allBackOn() {
+        std::wstring t = tweaksPath(), hud = hudIni(), disc = discIni();
+        auto saved = [&](const wchar_t* key) { return iniText(t, L"before_off", key, L""); };
+        if (!saved(L"tablet_scale").empty()) setTabletScale(std::clamp(float(_wtof(saved(L"tablet_scale").c_str())), .5f, 4.f));
+        if (saved(L"auto_dock") == L"1" && !autoDock_) dockTapped();
+        if (!saved(L"hud").empty() && exists(hud)) iniWrite(hud, L"general", L"enabled", saved(L"hud"));
+        if (!saved(L"hud_lines").empty() && hudLinesState() >= 0) setHudLines(saved(L"hud_lines") == L"1");
+        if (!saved(L"disc_button").empty() && exists(disc)) iniWrite(disc, L"summon", L"button", saved(L"disc_button"));
+        WritePrivateProfileStringW(L"before_off", nullptr, nullptr, t.c_str());
+        hostLog("settings: all back on");
+        message_ = L"Everything is back as it was (visor lines: when Echo starts again).";
+    }
+
+    // ---- NORMAL TABLET: Echo Arcade off the tablet once Echo VR closes ----
+    bool removalScheduled() const { return GetPrivateProfileIntW(L"normal", L"remove_on_exit", 0, tweaksPath().c_str()) != 0; }
+    void normalTabletTapped() {
+        uint64_t now = GetTickCount64();
+        if (removalScheduled()) {
+            iniWrite(tweaksPath(), L"normal", L"remove_on_exit", L"0");  // the helper sees it and stops
+            hostLog("settings: normal tablet cancelled");
+            message_ = L"Cancelled: Echo Arcade stays. What's off stays off until ALL BACK ON.";
+            return;
+        }
+        if (armedUntil_ < now) {
+            armedUntil_ = now + 4000;
+            message_ = L"Tap NORMAL TABLET again to be sure.";
+            return;
+        }
+        armedUntil_ = 0;
+        if (!allOff()) everythingOff();
+        iniWrite(tweaksPath(), L"normal", L"remove_on_exit", L"1");
+        hostLog("settings: normal tablet");
+        startRemover(false);
+    }
+    // tools\remove_on_exit.py, with the arcade folder's own Python, waits for Echo VR to close and
+    // then uninstalls. It must outlive Echo, so it can't stay in the job that closes the host
+    // with the game: it breaks away (the runtime allows that), else Windows (WMI) starts it.
+    void startRemover(bool quiet) {
+        std::wstring root = config_.root, py = root + L"\\.venv\\Scripts\\pythonw.exe", script = root + L"\\tools\\remove_on_exit.py";
+        if (root.empty() || !exists(py) || !exists(script)) {
+            iniWrite(tweaksPath(), L"normal", L"remove_on_exit", L"0");
+            hostLog("remover: missing %ls", root.empty() ? L"root= in arcade.ini" : exists(py) ? script.c_str() : py.c_str());
+            message_ = L"Couldn't find the arcade's folder: close Echo and run UNINSTALL.cmd instead.";
+            return;
+        }
+        std::wstring cmd = L"\"" + py + L"\" \"" + script + L"\" --game \"" + gameDir() + L"\" --tweaks \"" + tweaksPath() + L"\"";
+        if (!quiet) message_ = L"Normal tablet: Echo Arcade comes off the tablet when you close Echo VR. INSTALL.cmd brings it back.";
+        STARTUPINFOW si{sizeof(si)};
+        PROCESS_INFORMATION pi{};
+        std::wstring line = cmd;
+        if (CreateProcessW(py.c_str(), line.data(), nullptr, nullptr, FALSE, CREATE_BREAKAWAY_FROM_JOB | CREATE_SUSPENDED | CREATE_NO_WINDOW,
+                           nullptr, root.c_str(), &si, &pi)) {
+            BOOL inJob = TRUE;
+            IsProcessInJob(pi.hProcess, nullptr, &inJob);
+            if (!inJob) ResumeThread(pi.hThread); else TerminateProcess(pi.hProcess, 1);
+            CloseHandle(pi.hThread);
+            CloseHandle(pi.hProcess);
+            hostLog("remover: %s (pid %lu)", inJob ? "still in a job after breaking away; asking WMI" : "started", pi.dwProcessId);
+            if (!inJob) return;
+        } else {
+            hostLog("remover: breakaway start failed (error %lu); asking WMI", GetLastError());
+        }
+        spawn([this, cmd, root] {
+            SetEnvironmentVariableW(L"ECHO_ARCADE_REMOVER", cmd.c_str());
+            SetEnvironmentVariableW(L"ECHO_ARCADE_ROOT", root.c_str());
+            std::wstring ps = L"powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command \"$r = Invoke-CimMethod "
+                              L"-ClassName Win32_Process -MethodName Create -Arguments @{CommandLine=$env:ECHO_ARCADE_REMOVER; "
+                              L"CurrentDirectory=$env:ECHO_ARCADE_ROOT}; exit [int]$r.ReturnValue\"";
+            STARTUPINFOW s{sizeof(s)};
+            PROCESS_INFORMATION p{};
+            DWORD code = 1;
+            if (CreateProcessW(nullptr, ps.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &s, &p)) {
+                if (WaitForSingleObject(p.hProcess, 30000) == WAIT_OBJECT_0) GetExitCodeProcess(p.hProcess, &code);
+                CloseHandle(p.hThread);
+                CloseHandle(p.hProcess);
+            }
+            hostLog("remover: WMI start %s (%lu)", code == 0 ? "ok" : "failed", code);
+            if (code == 0) return;
+            std::lock_guard<std::mutex> lock(pendingLock_);
+            pending_.push_back([this] {
+                iniWrite(tweaksPath(), L"normal", L"remove_on_exit", L"0");
+                message_ = L"Couldn't schedule it (see host.log): close Echo and run UNINSTALL.cmd instead.";
+            });
+        });
+    }
+
+    // ---- the page ----
+    static Rect tabRect(int i, int n) {
+        int w = (SCREEN_W - 24 - (n - 1) * 6) / n;
+        return {12 + i * (w + 6), 84, 12 + i * (w + 6) + w, 136};
+    }
+    static int rowY(int i) { return SETTING_Y + i * SETTING_H; }
+    static Rect toggleRect(int i) { return {834, rowY(i) + 5, 1004, rowY(i) + 55}; }
+    static Rect actionRect(int i) { return {634, rowY(i) + 5, 1004, rowY(i) + 55}; }
+    static Rect choiceRect(int i, int k, int n) {
+        int w = n <= 2 ? 160 : n == 3 ? 130 : 84, x0 = 1004 - n * w - (n - 1) * 6 + k * (w + 6);
+        return {x0, rowY(i) + 5, x0 + w, rowY(i) + 55};
+    }
+    static Rect minusRect(int i) { return {574, rowY(i) + 5, 638, rowY(i) + 55}; }
+    static Rect plusRect(int i) { return {940, rowY(i) + 5, 1004, rowY(i) + 55}; }
+    static Rect trackRect(int i) { return {664, rowY(i) + 22, 914, rowY(i) + 38}; }
     bool settingsMode() const { return shared_->pageMode == 1; }
 
+    void change(Option& o, float v) {
+        if (o.kind == Kind::Slider) v = std::clamp(std::round(v / o.step) * o.step, o.min, o.max);
+        if (o.kind != Kind::Action && std::fabs(v - o.value) < .0001f) return;
+        o.set(v);
+        refreshOptions();  // one change can move others (ALL OFF, auto dock)
+    }
+
     void settingsTouch(const Touch& t) {
-        for (size_t i = 0; i < settings_.size(); i++) {
-            auto& s = settings_[i];
-            if (tapped(t, 600 + int(i) * 2, settingMinus(i))) { setSetting(i, s.value - s.step); return; }
-            if (tapped(t, 601 + int(i) * 2, settingPlus(i))) { setSetting(i, s.value + s.step); return; }
-            Rect track = settingTrack(i);
-            if (t.down && grow(track, 26).contains(t.x, t.y)) {  // tap or slide along the bar
-                float f = std::clamp(float(t.x - track.x0) / track.w(), 0.f, 1.f);
-                setSetting(i, s.min + f * (s.max - s.min));
-                return;
+        int n = int(pages_.size());
+        for (int i = 0; i < n; i++) {
+            if (!tabRect(i, n).contains(t.x, t.y)) continue;
+            if (tapped(t, 590 + i, tabRect(i, n))) { page_ = i; message_.clear(); refreshOptions(); }
+            return;
+        }
+        auto& options = pages_[page_].options;
+        for (int i = 0; i < int(options.size()) && i < SETTING_ROWS; i++) {
+            Option& o = options[i];
+            int id = 600 + i * 10;
+            switch (o.kind) {
+                case Kind::Toggle:
+                    if (toggleRect(i).contains(t.x, t.y)) { if (tapped(t, id, toggleRect(i))) change(o, o.value != 0 ? 0.f : 1.f); return; }
+                    break;
+                case Kind::Action:
+                    if (actionRect(i).contains(t.x, t.y)) { if (tapped(t, id, actionRect(i))) change(o, o.value); return; }
+                    break;
+                case Kind::Choice:
+                    for (int k = 0; k < int(o.choices.size()); k++) {
+                        Rect r = choiceRect(i, k, int(o.choices.size()));
+                        if (r.contains(t.x, t.y)) { if (tapped(t, id + k, r)) change(o, float(k)); return; }
+                    }
+                    break;
+                case Kind::Slider: {
+                    if (minusRect(i).contains(t.x, t.y)) { if (tapped(t, id, minusRect(i))) change(o, o.value - o.step); return; }
+                    if (plusRect(i).contains(t.x, t.y)) { if (tapped(t, id + 1, plusRect(i))) change(o, o.value + o.step); return; }
+                    Rect track = trackRect(i);
+                    Rect area{track.x0 - 20, rowY(i), track.x1 + 20, rowY(i) + SETTING_H};
+                    if (t.down && area.contains(t.x, t.y)) {  // tap or slide along the bar
+                        float f = std::clamp(float(t.x - track.x0) / track.w(), 0.f, 1.f);
+                        change(o, o.min + f * (o.max - o.min));
+                        return;
+                    }
+                    break;
+                }
             }
         }
         if (!t.down) pressed_ = -1;
     }
 
     void drawSettings() {
+        if (GetTickCount64() - refreshedAt_ > 1000) refreshOptions();  // files changed by hand, a confirm timing out
         canvas_.clear(rgb(14, 16, 24));
         header(L"SETTINGS", false);
-        for (size_t i = 0; i < settings_.size(); i++) {
-            auto& s = settings_[i];
-            int y = settingY(i);
-            wchar_t value[16];
-            swprintf(value, 16, L"%.2fx", s.value);
-            canvas_.text({24, y, 700, y + 44}, s.label, 26, rgb(235, 235, 240), true, 0);
-            canvas_.text({700, y, 1004, y + 44}, value, 26, rgb(90, 200, 255), true, 2);
-            button(settingMinus(i), L"\x2212", pressed_ == 600 + int(i) * 2, rgb(44, 50, 72), 36);
-            button(settingPlus(i), L"+", pressed_ == 601 + int(i) * 2, rgb(44, 50, 72), 36);
-            Rect track = settingTrack(i);
-            canvas_.fill(track, rgb(40, 44, 62));
-            int fill = track.x0 + int(track.w() * (s.value - s.min) / (s.max - s.min));
-            canvas_.fill({track.x0, track.y0, fill, track.y1}, rgb(70, 150, 190));
-            canvas_.fill({fill - 14, track.y0 - 16, fill + 14, track.y1 + 16}, rgb(235, 240, 250));
+        canvas_.text({600, 0, 1004, 76}, L"changes apply right away", 18, rgb(150, 160, 180), false, 2);
+        int n = int(pages_.size());
+        for (int i = 0; i < n; i++)
+            button(tabRect(i, n), pages_[i].name, pressed_ == 590 + i, i == page_ ? rgb(40, 96, 140) : rgb(36, 42, 62), 22);
+        const Page& page = pages_[page_];
+        const uint32_t onColor = rgb(40, 110, 60), offColor = rgb(44, 50, 72), pick = rgb(40, 96, 140);
+        for (int i = 0; i < int(page.options.size()) && i < SETTING_ROWS; i++) {
+            const Option& o = page.options[i];
+            int y = rowY(i), id = 600 + i * 10;
+            if (i) canvas_.fill({24, y - 1, 1000, y}, rgb(30, 34, 48));
+            int textRight = o.kind == Kind::Choice ? choiceRect(i, 0, int(o.choices.size())).x0 - 12
+                          : o.kind == Kind::Slider ? 470 : o.kind == Kind::Action ? 620 : 820;
+            canvas_.text({24, y + 4, textRight, y + 32}, o.label, 22, rgb(235, 235, 240), true, 0);
+            canvas_.text({24, y + 32, textRight, y + 58}, o.note, 15, rgb(140, 150, 170), false, 0);
+            switch (o.kind) {
+                case Kind::Toggle:
+                    button(toggleRect(i), o.value != 0 ? L"ON" : L"OFF", pressed_ == id, o.value != 0 ? onColor : offColor, 24);
+                    break;
+                case Kind::Action:
+                    button(actionRect(i), o.text(o.value), pressed_ == id, o.value != 0 ? rgb(130, 70, 30) : rgb(110, 40, 40), 22);
+                    break;
+                case Kind::Choice:
+                    for (int k = 0; k < int(o.choices.size()); k++)
+                        button(choiceRect(i, k, int(o.choices.size())), o.choices[k], pressed_ == id + k, int(o.value) == k ? pick : offColor, 20);
+                    break;
+                case Kind::Slider: {
+                    canvas_.text({470, y, 562, y + 60}, num(o.value, o.format), 22, rgb(90, 200, 255), true, 2);
+                    button(minusRect(i), L"\x2212", pressed_ == id, offColor, 30);
+                    button(plusRect(i), L"+", pressed_ == id + 1, offColor, 30);
+                    Rect track = trackRect(i);
+                    canvas_.fill(track, rgb(40, 44, 62));
+                    int fill = track.x0 + int(track.w() * (o.value - o.min) / (o.max - o.min));
+                    canvas_.fill({track.x0, track.y0, fill, track.y1}, rgb(70, 150, 190));
+                    canvas_.fill({fill - 10, track.y0 - 12, fill + 10, track.y1 + 12}, rgb(235, 240, 250));
+                    break;
+                }
+            }
         }
-        canvas_.text({24, 516, 1004, 572}, L"Saved instantly; the tablet size changes live. "
-                     L"View (FOV) is set in echo_tweaks.ini.", 17, rgb(150, 160, 180), false, 0);
+        if (!message_.empty()) messageBar();
+        else if (!page.footer.empty()) canvas_.text({24, SCREEN_H - 40, 1000, SCREEN_H}, page.footer, 17, rgb(150, 160, 180), false, 0);
     }
 
     // Stop whatever the game was being fed when the tab changes under a held finger.
@@ -1285,7 +1663,11 @@ private:
 
     void render() {
         bool settings = settingsMode();
-        if (settings != lastSettings_) { if (session_.alive()) releaseGameInput(); else resetInput(); lastSettings_ = settings; }
+        if (settings != lastSettings_) {
+            if (session_.alive()) releaseGameInput(); else resetInput();
+            lastSettings_ = settings;
+            if (settings) { buildPages(); message_.clear(); }  // a mod installed or removed meanwhile
+        }
         if (settings) { drawSettings(); canvas_.opaque(); return; }
         switch (mode_) {
             case Mode::Launcher: drawLauncher(); break;
@@ -1348,7 +1730,9 @@ private:
     int capW_ = 0, capH_ = 0;
     uint64_t captureSerial_ = 0;
     Rect fit_{};
-    std::vector<Setting> settings_;
+    std::vector<Page> pages_;
+    int page_ = 0;
+    uint64_t refreshedAt_ = 0, armedUntil_ = 0;
     bool lastSettings_ = false;
     LONG dockAsked_ = 0, dockSeen_ = 0, quietAsked_ = 0;
     bool autoDock_ = true;

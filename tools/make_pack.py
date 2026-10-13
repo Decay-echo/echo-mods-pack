@@ -34,6 +34,7 @@ FROM_DISC = {
     'hudplus/hudplus.cpp': 'hudplus/src/hudplus.cpp',
     'hudplus/hudplus_core.h': 'hudplus/src/hudplus_core.h',
     'hudplus/game_memory.h': 'hudplus/src/game_memory.h',
+    'hudplus/passes.h': 'hudplus/src/passes.h',
     'hudplus/build/EchoHudPlus.dll': 'hudplus/build/EchoHudPlus.dll',
     'hud_lines/install_hud_lines.py': 'hud_lines/install_hud_lines.py',
     'hud_lines/make_hud_lines_patch.py': 'hud_lines/make_hud_lines_patch.py',

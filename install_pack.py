@@ -176,8 +176,11 @@ def install(args):
         return
     print('\nALL DONE. Start Echo VR.')
     if not args.no_hud:
-        print(' - HUD: at the bottom of your view (settings: bin\\win10\\plugins\\EchoHudPlus\\settings.ini).')
+        print(' - HUD: at the bottom of your view, the pass counter at the top (it needs Echo\'s Settings > Game > '
+              'API access on).')
     if not args.no_arcade:
+        print(' - Settings: the arcade\'s gear tab on the hand tablet (HUD, glow, visor lines, and NORMAL to switch it '
+              'all off, or take it all out when Echo closes).')
         print(' - Arcade: open the hand tablet and press the gamepad tab (far left). FREEZE (top of the launcher) '
               'lets your Touch controllers play RetroArch; hold the menu button 1 s to move again.')
         print('   Your games go in ' + str(ARCADE / 'apps' / 'roms') + ' (one folder per system, see the README there).')

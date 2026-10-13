@@ -46,6 +46,12 @@ Config loadConfig() {
         GetPrivateProfileStringW(L"paths", key, fallback, buf, 2048, ini.c_str());
         return std::wstring(buf);
     };
+    c.root = get(L"root");
+    if (c.root.empty()) {  // older arcade.ini: apps\roms sits in the arcade folder
+        std::wstring roms = get(L"roms");
+        c.root = roms.substr(0, roms.find_last_of(L"\\/"));
+        c.root = c.root.substr(0, c.root.find_last_of(L"\\/"));
+    }
     c.love = get(L"love");
     c.balatroSteam = get(L"balatro_steam");
     c.retroarch = get(L"retroarch");

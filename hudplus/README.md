@@ -24,7 +24,9 @@ py -3 install_hudplus.py               # copy into plugins\, add the echoloader.
 py -3 install_hudplus.py --uninstall
 ```
 
-Settings: `plugins\EchoHudPlus\settings.ini` (positions, sizes, threshold, grace time, flash strength; restart Echo VR after changes). Positions are readout pixels from the centre of the speed: 512 px = 1 m at 0.319 m, y down. `install_hudplus.py --reset-settings` rewrites them with the defaults and keeps the old file as `settings.ini.old`. Log: `%LOCALAPPDATA%\EchoHudPlus\hudplus.log`.
+**Pass counter** (top of the view): "+1" each time the disc goes to a teammate (loose in between is fine; catching your own throw isn't a pass), the count itself from the 6th pass on, gone when the other team gets it. When the team with the chain scores, its count shows 50% bigger and blinks three times over two seconds. Either team's chain, in its colour (`[passes] teams=mine` for only yours). It reads who has the disc from Echo's own API (`http://127.0.0.1:6721/session`, 25 times a second in a match), so Echo's **Settings > Game > API access** must be on; it shows only what every player sees in the arena.
+
+Settings: `plugins\EchoHudPlus\settings.ini` (positions, sizes, threshold, grace time, flash strength, pass counter). Changes apply while Echo runs (it checks the file once a second), and most are on the arcade tablet's SETTINGS tab. Positions are readout pixels from the centre of the speed: 512 px = 1 m at 0.319 m, y down. `install_hudplus.py --reset-settings` rewrites them with the defaults and keeps the old file as `settings.ini.old`. Log: `%LOCALAPPDATA%\EchoHudPlus\hudplus.log`.
 
 It replaces EchoCrosshair (the centre dot); the installer removes that if it's still there.
 

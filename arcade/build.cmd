@@ -27,6 +27,8 @@ if errorlevel 1 exit /b 1
 
 cl %CFLAGS% tests\ipc_test.cpp /Fo:build\obj\ /Fe:build\ipc_test.exe
 if errorlevel 1 exit /b 1
+cl %CFLAGS% tests\settings_test.cpp /Fo:build\obj\ /Fe:build\settings_test.exe
+if errorlevel 1 exit /b 1
 cl /nologo /O2 /MT /W4 /EHsc /std:c++20 /DUNICODE /D_UNICODE /wd4100 /wd4201 tests\freeze_test.cpp /Fo:build\obj\ /Fe:build\freeze_test.exe /link ws2_32.lib
 if errorlevel 1 exit /b 1
 cl %CFLAGS% tests\tablet_scan_test.cpp native\runtime\tablet_scale.cpp /Fo:build\obj\ /Fe:build\tablet_scan_test.exe
@@ -38,6 +40,8 @@ set "LOCALAPPDATA=%~dp0build"
 build\ipc_test.exe
 if errorlevel 1 exit /b 1
 build\freeze_test.exe
+if errorlevel 1 exit /b 1
+build\settings_test.exe
 if errorlevel 1 exit /b 1
 build\tablet_scan_test.exe
 if errorlevel 1 exit /b 1
