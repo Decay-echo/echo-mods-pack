@@ -88,28 +88,41 @@ def disc_originals_back(game: Path, disc: Path, dry: bool):
     mod, or an unknown disc version) blocks the patch. When a copy of the original lies next to
     it, that copy goes back first and the odd DLL is kept as <name>.before-pack. Returns the
     names still in the way, with their hashes."""
+    import shutil
     scripts = game / 'bin' / 'win10' / 'scripts'
     blocked = []
     for name, (stock, patched) in disc_records(disc).items():
         f = scripts / name
         if not f.is_file():
             continue
+        # A backup the patcher would trust that is not the original (left by another mod) is moved aside.
+        old = f.with_name(name + '.personal-disc.original')
+        if old.is_file() and sha256(old) != stock:
+            aside = old.with_name(old.name + '.not-original')
+            print(f'{old.name} is not the original game file: ' + ('would be ' if dry else '') + f'moved aside as {aside.name}')
+            if not dry:
+                if aside.exists():
+                    aside.unlink()
+                old.rename(aside)
         h = sha256(f)
         if disc_dll_state(h, stock, patched) != 'unknown':
             continue
         copies = stock_copies(scripts, name, stock)
+        shipped = disc / 'originals' / name
+        if not copies and shipped.is_file() and sha256(shipped) == stock:
+            copies = [shipped]
         if not copies:
             blocked.append((name, h))
             continue
+        where = copies[0].name if copies[0].parent == scripts else 'the add-on\'s originals folder'
         if dry:
-            print(f'{name} is not the original (sha256 {h[:16]}...): would put the original back from {copies[0].name}')
+            print(f'{name} is not the original (sha256 {h[:16]}...): would put the original back from {where}')
             continue
-        import shutil
         keep = f.with_name(name + '.before-pack')
         if not keep.exists():
             shutil.copy2(f, keep)
         shutil.copy2(copies[0], f)
-        print(f'{name} was not the original (another mod? sha256 {h[:16]}...): the original from {copies[0].name} is back; '
+        print(f'{name} was not the original (another mod? sha256 {h[:16]}...): the original from {where} is back; '
               f'the other one is kept as {keep.name}')
     return blocked
 
@@ -354,8 +367,8 @@ def install(args):
         if blocked:
             for name, h in blocked:
                 print(f'{name} is not the original game file and not a disc version this patch knows (sha256 {h}).')
-            print('NOT INSTALLED: the personal disc needs the original DLLs. If another personal-disc mod is in, run its RESTORE; '
-                  'else put the original file back (a reinstall of Echo VR\'s files does), then INSTALL.cmd again. '
+            print('NOT INSTALLED: the personal disc needs the original DLLs and this add-on has no copy of them. Put the '
+                  'original file back (another disc mod\'s RESTORE, or a reinstall of Echo VR\'s files), then INSTALL.cmd again. '
                   'The rest of the pack is in.')
             disc = None
         elif args.dry_run:
@@ -517,7 +530,9 @@ def check(args):
             say(f'  {name}: sha256 {h[:16]}... {state}')
             if known:
                 copies = stock_copies(scripts, name, stock)
-                say('    copies of the original next to it: ' + (', '.join(c.name for c in copies) if copies else 'none'))
+                shipped = disc / 'originals' / name
+                say('    copies of the original: ' + (', '.join(c.name for c in copies) if copies else 'none next to it') +
+                    ('; one in the add-on' if shipped.is_file() and sha256(shipped) == stock else ''))
         button = win10 / 'plugins' / 'DiscButton.dll'
         say('  DiscButton.dll: ' + (f'{button.stat().st_size} bytes' if button.is_file() else 'not installed'))
         ini = win10 / 'plugins' / 'DiscButton' / 'settings.ini'

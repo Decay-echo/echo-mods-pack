@@ -47,7 +47,7 @@ Details: [arcade/README.md](arcade/README.md).
 
 ## What's in the zip, and what isn't
 
-The zip has the installers, the source of both mods, and their built plugin files (`hudplus\build\EchoHudPlus.dll`, `arcade\dist\`). **No Echo VR files are included.** The HUD font and the HUD-lines patch are made on your PC from your own install. RetroArch and its cores, LÖVE, mpv, yt-dlp, the DOOM shareware and the [Doom-on-EchoVR](https://github.com/heisthecat31/Doom-on-EchoVR) package tools download from their official sources while installing. No ROMs or commercial games are included: bring your own.
+The zip has the installers, the source of both mods, and their built plugin files (`hudplus\build\EchoHudPlus.dll`, `arcade\dist\`). **No Echo VR files are included** (the separate personal-disc add-on carries the two original script DLLs it may need to put back; see its README). The HUD font and the HUD-lines patch are made on your PC from your own install. RetroArch and its cores, LÖVE, mpv, yt-dlp, the DOOM shareware and the [Doom-on-EchoVR](https://github.com/heisthecat31/Doom-on-EchoVR) package tools download from their official sources while installing. No ROMs or commercial games are included: bring your own.
 
 ## Credits
 
