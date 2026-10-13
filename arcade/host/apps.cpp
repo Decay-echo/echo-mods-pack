@@ -150,12 +150,22 @@ static std::wstring redact(std::wstring s) {
 }
 
 std::vector<AppInfo> listApps(const Config& c) {
-    // Top row: games. Your own games first (up to three, playlists.cpp), then the stock ones
-    // that still fit: Balatro, Duck Hunt, DOOM. Bottom row: RetroArch itself, Movies, YouTube.
+    // Top row: Minecraft (or MOVIES), then your own games (up to two, playlists.cpp), then the
+    // stock ones that still fit: Balatro, Duck Hunt, DOOM. Then RetroArch itself, YouTube,
+    // MEDIA, SPLIT SCREEN, SHARE MY TABLET, WATCH A FRIEND (and ECHO VR when it is on).
     std::vector<AppInfo> games, apps;
-    std::vector<OwnGame> own = exists(c.retroarch) ? ownGames(c, 3) : std::vector<OwnGame>{};
+    std::vector<OwnGame> own = exists(c.retroarch) ? ownGames(c, 2) : std::vector<OwnGame>{};
     static const uint32_t colours[3] = {rgb(222, 64, 64), rgb(64, 132, 230), rgb(200, 120, 40)};
-    for (size_t i = 0; i < own.size() && i < 3; i++) {
+    if (c.moviesTile) {
+        std::wstring mpvMissing = exists(c.mpv) ? L"" : L"mpv missing - rerun setup_apps.py";
+        games.push_back({AppId::Movies, L"MOVIES", L"Your video folders", mpvMissing, rgb(40, 170, 150)});
+    } else {
+        std::vector<Launcher> launchers = minecraftLaunchers(c);
+        std::wstring sub = launchers.empty() ? L"Java Edition" : launchers.size() == 1 ? launchers[0].name : L"Java: " + std::to_wstring(launchers.size()) + L" launchers";
+        games.push_back({AppId::Minecraft, L"MINECRAFT", sub + L" - FREEZE to play",
+                         launchers.empty() ? L"No Minecraft launcher found (Java Edition)" : L"", rgb(92, 160, 64)});
+    }
+    for (size_t i = 0; i < own.size() && i < 2; i++) {
         AppInfo a{AppId::OwnGame, own[i].title, own[i].system + L" via RetroArch",
                   exists(own[i].core) ? L"" : L"Its RetroArch core is missing - rerun the installer", colours[i]};
         a.core = own[i].core;
@@ -172,27 +182,21 @@ std::vector<AppInfo> listApps(const Config& c) {
     const AppInfo stock[3] = {{AppId::BalatroSteam, L"BALATRO", L"Steam original", balatroMissing, colours[0]},
                               {AppId::DuckHunt, L"DUCK HUNT", L"NES Zapper light gun", duckMissing, colours[1]},
                               {AppId::Doom, L"DOOM", L"Shareware via RetroArch", doomMissing, colours[2]}};
-    for (int i = 2; i >= 0 && games.size() < 3; i--) games.insert(games.begin() + int(own.size()), stock[i]);  // DOOM stays longest
+    for (int i = 2; i >= 0 && games.size() < 3; i--) games.insert(games.begin() + int(own.size()) + 1, stock[i]);  // DOOM stays longest
     apps.push_back({AppId::RetroArch, L"RETROARCH", L"All cores - full menu",
                     exists(c.retroarch) ? L"" : L"RetroArch missing - rerun the installer", rgb(150, 90, 220)});
-    if (c.moviesTile) {
-        std::wstring mpvMissing = exists(c.mpv) ? L"" : L"mpv missing - rerun setup_apps.py";
-        apps.push_back({AppId::Movies, L"MOVIES", L"Your video folders", mpvMissing, rgb(40, 170, 150)});
-    } else {
-        std::vector<Launcher> launchers = minecraftLaunchers(c);
-        std::wstring sub = launchers.empty() ? L"Java Edition" : launchers.size() == 1 ? launchers[0].name : L"Java: " + std::to_wstring(launchers.size()) + L" launchers";
-        apps.push_back({AppId::Minecraft, L"MINECRAFT", sub + L" - FREEZE to play",
-                        launchers.empty() ? L"No Minecraft launcher found (Java Edition)" : L"", rgb(92, 160, 64)});
-    }
-    // Shows the YouTube page open in your browser; with yt-dlp (setup_apps.py) also search and saved links.
+    // YouTube inside the tablet (yt-dlp), else the YouTube page open in your browser.
+    apps.push_back({AppId::YouTube, L"YOUTUBE", exists(c.ytdlp) ? L"Home, search, your links" : L"Your browser's YouTube",
+                    L"", rgb(255, 48, 64)});
+    apps.push_back({AppId::Media, L"MEDIA", L"Play, skip, volume: whatever plays on this PC", L"", rgb(60, 170, 110)});
+    apps.push_back({AppId::Split, L"SPLIT SCREEN", L"Up to 4 friends' tablets at once, one code", L"", rgb(200, 60, 160)});
+    apps.push_back({AppId::Share, L"SHARE MY TABLET", L"Friends watch your tablet with a code", L"", rgb(210, 120, 40)});
+    apps.push_back({AppId::Watch, L"WATCH A FRIEND", L"A friend's tablet on yours: videos, games, anything", L"", rgb(40, 150, 210)});
     // Echo in Echo: a second Echo VR in its desktop mode (-noovr: no headset, a flat window with
     // mouse and keyboard), on the tablet like any other game. For the friends.
     if (c.echoInEcho)
         apps.push_back({AppId::EchoInner, L"ECHO VR", L"Echo in Echo (desktop mode) - FREEZE to play",
                         exists(echoExe(c)) ? L"" : L"echovr.exe not found next to the plugin", rgb(230, 120, 40)});
-    apps.push_back({AppId::Media, L"MEDIA", L"Play, skip, volume: whatever plays on this PC", L"", rgb(60, 170, 110)});
-    apps.push_back({AppId::YouTube, L"YOUTUBE", exists(c.ytdlp) ? L"Home, search, your links" : L"Your browser's YouTube",
-                    L"", rgb(255, 48, 64)});
     games.insert(games.end(), apps.begin(), apps.end());
     return games;
 }
@@ -326,6 +330,16 @@ bool Session::launch(AppId id, const std::wstring& target, double startSeconds,
     hostLog("launched pid=%lu: %ls", pid_, redact(cmd).c_str());
     if (isVideo(id)) mpv_.connect();
     return true;
+}
+
+DWORD Session::audioPid() const {
+    if (!process_) return 0;
+    if (id_ == AppId::Minecraft && minecraftGame_) {
+        DWORD pid = 0;
+        GetWindowThreadProcessId(minecraftGame_, &pid);
+        if (pid) return pid;
+    }
+    return pid_;
 }
 
 bool Session::alive() const {

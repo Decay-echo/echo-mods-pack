@@ -6,7 +6,7 @@
 #include <deque>
 #include <thread>
 
-enum class AppId { BalatroSteam, DuckHunt, RetroArch, Doom, Movies, Plex, YouTube, OwnGame, Minecraft, EchoInner, Media };
+enum class AppId { BalatroSteam, DuckHunt, RetroArch, Doom, Movies, Plex, YouTube, OwnGame, Minecraft, EchoInner, Media, Share, Watch, Split };
 
 struct AppInfo {
     AppId id;
@@ -49,6 +49,7 @@ public:
     bool hasWindow() const { return window_ != nullptr; }
     HWND window() const { return window_; }
     AppId id() const { return id_; }
+    DWORD audioPid() const;      // the process whose sound is the app's (Minecraft: the game, not the launcher); 0 = none
     Rect contentRect() const;    // where the app goes on the tablet screen
     Rect windowRect() const;     // the window's size: that, times the window scale (2 for poster quality HIGH)
     void setWindowScale(int s) { windowScale_ = s < 1 ? 1 : s; }

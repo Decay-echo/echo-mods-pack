@@ -58,6 +58,7 @@ struct Config {
     bool echoInEcho = false;          // the ECHO VR tile (a second Echo VR in desktop mode); off unless asked for
     float minecraftLook = 3.f;        // FREEZE in Minecraft: mouse pixels per tick at full stick
     int balatroPort = 55410, retroCmdPort = 55355, retroPadPort = 55400;
+    int sharePort = 6730;             // SHARE MY TABLET listens here (TCP)
 };
 Config loadConfig();
 

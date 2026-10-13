@@ -3,6 +3,7 @@
 // exits when Echo VR goes away.
 #include "apps.h"
 #include "thumbs.h"
+#include "share.h"
 #include "minecraft.h"
 #include "mod_settings.h"
 #include "touchpad.h"
@@ -74,7 +75,9 @@ std::wstring clock(double s) {
     return b;
 }
 
-enum class Mode { Launcher, Browse, PlexLink, Running, Menu, Keyboard, Screen, Media };
+enum class Mode { Launcher, Browse, PlexLink, Running, Menu, Keyboard, Screen, Media, Watch, Split };
+const Rect WATCH_BACK{12, 6, 236, 52}, WATCH_LEAVE{248, 6, 420, 52};  // WATCH A FRIEND: back to my own tablet (still connected) / disconnect
+const Rect SPLIT_STOP{12, 6, 180, 52}, SPLIT_MINE{192, 6, 416, 52};   // SPLIT SCREEN: end it / my own tablet (it goes on)
 // The MEDIA page: now playing, then play / skip, then volume.
 const Rect MEDIA_PREV{40, 230, 320, 330}, MEDIA_PLAY{372, 230, 652, 330}, MEDIA_NEXT{704, 230, 984, 330};
 const Rect MEDIA_VOLDOWN{40, 360, 320, 460}, MEDIA_MUTE{372, 360, 652, 460}, MEDIA_VOLUP{704, 360, 984, 460};
@@ -139,6 +142,8 @@ public:
             pollScreen(now);
             pollMedia(now);
             pollAds(now);
+            pollWatch();
+            share_.audioSource(shareAudioPid());
             pollDock();
             autoDock(now);
             if (shotUpAt_ && now >= shotUpAt_) { shotUpAt_ = 0; onTouch({SHOT_TOUCH, false, shotX_, shotY_}); }
@@ -146,6 +151,9 @@ public:
             if (now - lastPublish >= (visible ? 16u : 200u)) {
                 render();
                 publish();
+                composeSplit();
+                share_.offer(share_.split() ? split_.pixels() : screen_.pixels(), SCREEN_W, SCREEN_H);
+                offerMyTablet();
                 lastPublish = now;
             }
             Sleep(4);
@@ -234,6 +242,9 @@ private:
         if (app.id == AppId::Plex) { openPlex(); return; }
         if (app.id == AppId::YouTube) { openYouTube(); return; }
         if (app.id == AppId::Media) { openMedia(); return; }
+        if (app.id == AppId::Share) { shareTapped(); return; }
+        if (app.id == AppId::Watch) { openWatch(); return; }
+        if (app.id == AppId::Split) { splitTapped(); return; }
         if (app.id == AppId::Minecraft) { openMinecraft(); return; }
         if (!session_.launch(app.id, app.rom, 0, {}, 0, app.core)) { message_ = L"Could not start " + app.title + L" (see host.log)."; return; }
         gunUsed_ = false;
@@ -840,6 +851,7 @@ private:
 
     void keyboardTouch(const Touch& t) {
         if (tapped(t, 100, BACK_BUTTON)) {
+            keyboardForWatch_ = false;
             if (keyboardForScreen_ && screenWin_) { keyboardForScreen_ = false; mode_ = Mode::Screen; }
             else mode_ = screens_.empty() ? Mode::Launcher : Mode::Browse;
             resetInput();
@@ -854,7 +866,12 @@ private:
         if (tapped(t, 740, KEY_DEL)) { if (!query_.empty()) query_.pop_back(); return; }
         if (tapped(t, 741, KEY_SPACE)) { if (query_.size() < QUERY_MAX && !query_.empty() && query_.back() != L' ') query_ += L' '; return; }
         if (tapped(t, 742, KEY_CLEAR)) { query_.clear(); return; }
-        if (tapped(t, 743, KEY_SEARCH)) { if (keyboardForScreen_ && screenWin_) screenSearch(); else searchYouTube(); return; }
+        if (tapped(t, 743, KEY_SEARCH)) {
+            if (keyboardForWatch_) startWatch(query_);
+            else if (keyboardForScreen_ && screenWin_) screenSearch();
+            else searchYouTube();
+            return;
+        }
         if (!t.down) pressed_ = -1;
     }
 
@@ -1112,6 +1129,13 @@ private:
         wchar_t buf[32];
         swprintf(buf, 32, format, v);
         return buf;
+    }
+    static std::string narrowUtf8(const std::wstring& w) {
+        if (w.empty()) return {};
+        int n = WideCharToMultiByte(CP_UTF8, 0, w.data(), int(w.size()), nullptr, 0, nullptr, nullptr);
+        std::string s(size_t(n), '\0');
+        WideCharToMultiByte(CP_UTF8, 0, w.data(), int(w.size()), s.data(), n, nullptr, nullptr);
+        return s;
     }
     static std::wstring widenUtf8(const std::string& s) {
         if (s.empty()) return {};
@@ -1655,6 +1679,21 @@ private:
 
     void onTouch(const Touch& t) {
         if (t.down) held_[t.cell] = t; else held_.erase(t.cell);
+        // A landing (tapped() fires on it): the first cell down while none was held, and not
+        // within a blink of the last one (a finger on the line between two buttons presses
+        // both; the release of one cell can come before the press of the next).
+        uint64_t touchNow = GetTickCount64();
+        if (!t.move) {
+            if (t.down) {
+                if (heldCount_ && touchNow - lastTouchAt_ > 1500) heldCount_ = 0;  // a release that never came
+                landing_ = heldCount_ == 0 && touchNow - firedAt_ > 150;
+                heldCount_++;
+            } else {
+                heldCount_ = std::max(0, heldCount_ - 1);
+                landing_ = false;
+            }
+            lastTouchAt_ = touchNow;
+        }
         if (!loading_.empty() && !settingsMode()) return;
         if (settingsMode()) { settingsTouch(t); return; }
         switch (mode_) {
@@ -1665,6 +1704,8 @@ private:
             case Mode::Keyboard: keyboardTouch(t); break;
             case Mode::Screen: screenTouch(t); break;
             case Mode::Media: mediaTouch(t); break;
+            case Mode::Watch: watchTouch(t); break;
+            case Mode::Split: splitTouch(t); break;
             case Mode::Running:
                 if (isVideo(session_.id())) playerTouch(t);
                 else if (isRetro(session_.id())) retroTouch(t);
@@ -1675,12 +1716,19 @@ private:
     }
 
     // A tap = press and release on the same control.
+    // A button fires the moment the finger lands on it: a poke in VR often lifts off somewhere
+    // else, or its release comes late or not at all, and waiting for it lost taps. One landing
+    // fires once (the fingertip covers several touch cells and each reports a press; onTouch
+    // counts the cells held, and a landing is the first cell down when none was). Half a touch
+    // cell of slack around the button: a cell's centre may sit just outside a small one.
     bool tapped(const Touch& t, int index, Rect r) {
-        if (!r.contains(t.x, t.y)) return false;
-        if (t.down) { pressed_ = index; return false; }
-        bool hit = pressed_ == index;
-        pressed_ = -1;
-        return hit;
+        Rect wide{r.x0 - 8, r.y0 - 8, r.x1 + 8, r.y1 + 8};
+        if (!wide.contains(t.x, t.y) || !t.down || t.move) return false;
+        if (!landing_) { if (pressed_ < 0) pressed_ = index; return false; }  // the same poke, another cell under the fingertip
+        landing_ = false;
+        pressed_ = index;
+        firedAt_ = GetTickCount64();
+        return true;
     }
 
     void launcherTouch(const Touch& t) {
@@ -1905,9 +1953,12 @@ private:
                 canvas_.text({r.x0 + 30, r.y0 + 22 - up, r.x1 - 12, r.y0 + 60 - up}, a.title.substr(0, split), 28, rgb(245, 245, 250), true, 0);
                 canvas_.text({r.x0 + 30, r.y0 + 58 - up, r.x1 - 12, r.y0 + 96 - up}, a.title.substr(split + 1), 28, rgb(245, 245, 250), true, 0);
             }
-            canvas_.text({r.x0 + 30, r.y0 + 96 - up, r.x1 - 12, r.y0 + 134 - up}, a.subtitle, compactTiles() ? 19 : 21, rgb(180, 190, 210), false, 0);
-            if (!a.missing.empty())
-                canvas_.text({r.x0 + 30, r.y0 + (compactTiles() ? 118 : 140), r.x1 - 12, r.y0 + (compactTiles() ? 148 : 180)}, a.missing, 17, rgb(255, 170, 90), false, 0);
+            std::wstring sub = tileSub(a), note = tileNote(a);
+            bool codeNote = (a.id == AppId::Share || a.id == AppId::Split) && share_.running();
+            canvas_.text({r.x0 + 30, r.y0 + 96 - up, r.x1 - 12, r.y0 + 134 - up}, sub, compactTiles() ? 19 : 21, rgb(180, 190, 210), false, 0);
+            if (!note.empty())
+                canvas_.text({r.x0 + 30, r.y0 + (compactTiles() ? 118 : 140), r.x1 - 12, r.y0 + (compactTiles() ? 148 : 180)}, note,
+                             codeNote ? 20 : 17, codeNote ? rgb(90, 200, 255) : rgb(255, 170, 90), codeNote, 0);
         }
         messageBar();
     }
@@ -2009,6 +2060,235 @@ private:
         messageBar();
     }
 
+    // ---- SHARE MY TABLET / WATCH A FRIEND (share.h): this screen streamed to friends, a
+    // friend's screen shown here.
+    static std::wstring upper(std::wstring s) { for (auto& ch : s) ch = wchar_t(towupper(ch)); return s; }
+    std::wstring shareName() const {
+        std::wstring n = iniText(tweaksPath(), L"share", L"name", L"");
+        if (n.empty()) {
+            wchar_t pc[MAX_COMPUTERNAME_LENGTH + 1];
+            DWORD len = MAX_COMPUTERNAME_LENGTH + 1;
+            if (GetComputerNameW(pc, &len)) n = pc;
+        }
+        return n.empty() ? L"a friend" : n;
+    }
+    std::wstring tileSub(const AppInfo& a) const {
+        if (a.id == AppId::Split && share_.running() && share_.split()) {
+            int n = share_.viewers();
+            return L"ON - " + std::to_wstring(n) + (n == 1 ? L" friend connected" : L" friends connected") + L" - tap to look";
+        }
+        if (a.id == AppId::Share && share_.running() && share_.split()) return L"SPLIT SCREEN is sharing - tap for details";
+        if (a.id == AppId::Share && share_.running()) {
+            int n = share_.viewers();
+            if (share_.code().empty() && share_.lanCode().empty()) return share_.status().empty() ? L"SHARING - finding your address..." : share_.status();
+            return n == 0 ? L"SHARING - nobody watching yet; tap for details" : L"SHARING - " + std::to_wstring(n) + (n == 1 ? L" friend watching" : L" friends watching");
+        }
+        if (a.id == AppId::Watch && watch_.active()) return L"Watching " + watch_.friendName() + L" - tap to go back to it";
+        return a.subtitle;
+    }
+    std::wstring tileNote(const AppInfo& a) const {
+        if ((a.id == AppId::Share || a.id == AppId::Split) && share_.running()) {
+            std::wstring c = share_.code();
+            return c.empty() ? share_.lanCode() : c;
+        }
+        return a.missing;
+    }
+    void shareTapped() {
+        if (!share_.running()) {
+            share_.start(uint16_t(config_.sharePort), shareName(), false);
+            message_ = share_.running() ? L"Sharing your tablet. The code appears on the tile in a moment; tap the tile again for the LAN code or to stop."
+                                        : share_.status();
+            return;
+        }
+        Screen s{L"SHARE MY TABLET"};
+        std::wstring c = share_.code(), lan = share_.lanCode(), st = share_.status();
+        s.entries.push_back({c.empty() ? L"Finding your internet address..." : L"Your code:   " + c,
+                             L"Friends type it in WATCH A FRIEND > Enter a code (from anywhere on the internet)", nullptr});
+        if (!lan.empty()) s.entries.push_back({L"LAN code:   " + lan, L"For a friend on the same network or VPN", nullptr});
+        if (!st.empty()) s.entries.push_back({st, L"The router did not open the port by itself: forward it, or friends use the LAN code", nullptr});
+        int n = share_.viewers();
+        s.entries.push_back({std::to_wstring(n) + (n == 1 ? L" friend watching" : L" friends watching"),
+                             L"Any number can watch at once; they see this screen and hear the app on it (Windows 11)", nullptr});
+        s.entries.push_back({L"STOP SHARING", L"Nobody can watch after this", [this] { share_.stop(); message_ = L"Sharing stopped."; toLauncher(); }});
+        push(s);
+    }
+    DWORD shareAudioPid() const {
+        if (mode_ == Mode::Screen && screenWin_) {
+            DWORD pid = 0;
+            GetWindowThreadProcessId(screenWin_, &pid);
+            return pid;
+        }
+        if ((mode_ == Mode::Running || mode_ == Mode::Menu) && session_.alive()) return session_.audioPid();
+        return 0;
+    }
+    std::wstring friendsPath() const { return localAppData() + L"\\EchoArcade\\friends.txt"; }
+    std::vector<std::pair<std::wstring, std::wstring>> friends() const {  // name, code
+        std::vector<std::pair<std::wstring, std::wstring>> out;
+        std::string text;
+        if (!readFile(friendsPath(), text)) return out;
+        std::wstring all = widenUtf8(text), line;
+        auto trim = [](std::wstring s) {
+            while (!s.empty() && (s.back() == L' ' || s.back() == L'\r' || s.back() == L'\t')) s.pop_back();
+            size_t i = 0;
+            while (i < s.size() && (s[i] == L' ' || s[i] == L'\t')) i++;
+            return s.substr(i);
+        };
+        for (size_t i = 0; i <= all.size(); i++) {
+            if (i < all.size() && all[i] != L'\n') { line += all[i]; continue; }
+            size_t bar = line.find(L'|');
+            if (bar != std::wstring::npos && line[0] != L'#') {
+                std::wstring name = trim(line.substr(0, bar)), code = trim(line.substr(bar + 1));
+                if (!code.empty()) out.push_back({name.empty() ? code : name, code});
+            }
+            line.clear();
+        }
+        return out;
+    }
+    void rememberFriend(const std::wstring& name, const std::wstring& code) {
+        auto list = friends();
+        list.erase(std::remove_if(list.begin(), list.end(), [&](auto& f) { return f.second == code; }), list.end());
+        list.insert(list.begin(), {name, code});
+        if (list.size() > 8) list.resize(8);
+        std::string out = "# WATCH A FRIEND remembers the last codes here, one a line:  Name | code\n";
+        for (auto& f : list) out += narrowUtf8(f.first) + " | " + narrowUtf8(f.second) + "\n";
+        FILE* f = nullptr;
+        if (_wfopen_s(&f, friendsPath().c_str(), L"wb") == 0 && f) { fwrite(out.data(), 1, out.size(), f); fclose(f); }
+    }
+    void openWatch() {
+        if (watch_.active()) { mode_ = Mode::Watch; watchBarUntil_ = GetTickCount64() + 6000; resetInput(); return; }
+        Screen s{L"WATCH A FRIEND"};
+        s.entries.push_back({L"Enter a code", L"The code on your friend's SHARE MY TABLET tile", [this] { keyboardForWatch_ = true; mode_ = Mode::Keyboard; resetInput(); }});
+        for (auto& f : friends()) s.entries.push_back({f.first, f.second, [this, f] { startWatch(f.second); }});
+        if (share_.running() && !share_.code().empty()) s.entries.push_back({L"Your own code:   " + share_.code(), L"What friends type to watch you", nullptr});
+        push(s);
+    }
+    void startWatch(const std::wstring& code) {
+        AudioTarget audio = findAudioDevice(config_.audioDevice);
+        watch_.connect(code, shareName(), audio.id);
+        if (!watch_.active()) { message_ = watch_.status(); return; }
+        keyboardForWatch_ = false;
+        query_.clear();
+        watchRemembered_ = false;
+        mode_ = Mode::Watch;
+        watchBarUntil_ = GetTickCount64() + 6000;
+        resetInput();
+    }
+    void pollWatch() {
+        if (watch_.active()) watch_.setState(mode_ == Mode::Watch ? ShareState::Looking : ShareState::Away);
+        if (mode_ != Mode::Watch) return;
+        if (watch_.connected() && !watchRemembered_) {
+            watchRemembered_ = true;
+            rememberFriend(watch_.friendName(), watch_.code());
+        }
+        if (!watch_.active()) watchBarUntil_ = UINT64_MAX;  // over: the bar stays, with what happened and the way back
+    }
+    void watchTouch(const Touch& t) {
+        if (tapped(t, 820, WATCH_BACK)) { if (!watch_.active()) watch_.disconnect(); toLauncher(); return; }  // still connected: the WATCH tile comes back here
+        if (tapped(t, 821, WATCH_LEAVE)) { watch_.disconnect(); toLauncher(); return; }
+        if (t.down && pressed_ < 0) watchBarUntil_ = GetTickCount64() + 6000;  // a tap anywhere brings the bar
+        if (!t.down) pressed_ = -1;
+    }
+    void drawWatch() {
+        canvas_.clear(rgb(10, 10, 14));
+        auto pic = watch_.latest();
+        if (pic && pic->w) {
+            canvas_.blit(pic->bgra.data(), pic->w, pic->h, pic->w * 4, {0, 0, SCREEN_W, SCREEN_H});
+        } else {
+            canvas_.text({40, 220, SCREEN_W - 40, 280}, watch_.status(), 28, rgb(220, 225, 235));
+            if (watch_.active()) canvas_.text({0, 290, SCREEN_W, 330}, watch_.connected() ? L"Waiting for the first picture..." : L"", 20, rgb(140, 150, 170), false);
+        }
+        if (GetTickCount64() < watchBarUntil_) {
+            canvas_.fill({0, 0, SCREEN_W, 58}, rgb(24, 24, 28));
+            button(WATCH_BACK, L"\x25C0  MY TABLET", pressed_ == 820, rgb(50, 58, 84), 22);
+            button(WATCH_LEAVE, L"LEAVE", pressed_ == 821, rgb(120, 50, 50), 22);
+            canvas_.text({436, 0, SCREEN_W - 12, 58}, watch_.status() + (watch_.split() && watch_.connected() ? L"  (split screen)" : L""), 22, rgb(200, 210, 230), false, 0);
+        }
+    }
+
+    // ---- SPLIT SCREEN: a share whose viewers send their tablets back. The layout of them
+    // (2 halves, 3 three ways, 4 quadrants), with my own tablet while I am on it, is the
+    // shared picture; in Mode::Split I look at it myself.
+    void splitTapped() {
+        if (share_.running() && !share_.split()) share_.stop();  // a plain share becomes the split screen
+        if (!share_.running()) {
+            share_.start(uint16_t(config_.sharePort), shareName(), true);
+            if (!share_.running()) { message_ = share_.status(); return; }
+            message_ = L"Split screen on. Friends join with the code (WATCH A FRIEND > Enter a code) and their tablets appear here.";
+        }
+        mode_ = Mode::Split;
+        splitBarUntil_ = GetTickCount64() + 8000;
+        resetInput();
+    }
+    static std::vector<Rect> splitRects(size_t n) {
+        const int W = SCREEN_W, H = SCREEN_H;
+        if (n <= 1) return {{0, 0, W, H}};
+        if (n == 2) return {{0, 0, W / 2, H}, {W / 2, 0, W, H}};
+        if (n == 3) return {{0, 0, W / 2, H / 2}, {W / 2, 0, W, H / 2}, {W / 4, H / 2, W * 3 / 4, H}};
+        return {{0, 0, W / 2, H / 2}, {W / 2, 0, W, H / 2}, {0, H / 2, W / 2, H}, {W / 2, H / 2, W, H}};
+    }
+    void composeSplit() {
+        if (!share_.running() || !share_.split()) return;
+        struct Pane { std::wstring label; const uint8_t* pixels; int w, h, pitch; bool looking; };
+        std::vector<Pane> panes;
+        if (mode_ != Mode::Split) panes.push_back({L"You", reinterpret_cast<const uint8_t*>(screen_.pixels()), SCREEN_W, SCREEN_H, SCREEN_W * 4, false});
+        auto parts = share_.participants();
+        for (auto& p : parts) {
+            if (panes.size() >= 4) break;
+            if (p.picture && p.picture->w) panes.push_back({p.name, p.picture->bgra.data(), p.picture->w, p.picture->h, p.picture->w * 4, p.state == ShareState::Looking});
+            else panes.push_back({p.name, nullptr, 0, 0, 0, p.state == ShareState::Looking});
+        }
+        split_.clear(rgb(8, 8, 12));
+        if (panes.empty()) {
+            split_.text({0, 140, SCREEN_W, 200}, L"SPLIT SCREEN", 44, rgb(230, 120, 220));
+            split_.text({0, 212, SCREEN_W, 252}, L"Friends join in WATCH A FRIEND > Enter a code:", 24, rgb(200, 205, 220), false);
+            std::wstring c = share_.code(), lan = share_.lanCode();
+            split_.text({0, 262, SCREEN_W, 332}, c.empty() ? (lan.empty() ? L"finding your address..." : lan) : c, 56, rgb(90, 200, 255));
+            if (!c.empty() && !lan.empty()) split_.text({0, 342, SCREEN_W, 377}, L"LAN code " + lan, 22, rgb(150, 160, 180), false);
+            std::wstring st = share_.status();
+            if (!st.empty()) split_.text({0, 392, SCREEN_W, 427}, st, 22, rgb(255, 170, 90), false);
+            return;
+        }
+        auto rects = splitRects(panes.size());
+        for (size_t i = 0; i < panes.size(); i++) {
+            Rect r = rects[i];
+            Rect inner{r.x0 + 2, r.y0 + 2, r.x1 - 2, r.y1 - 2};
+            if (panes[i].pixels) {
+                split_.blit(panes[i].pixels, panes[i].w, panes[i].h, panes[i].pitch, inner);
+            } else {
+                split_.fill(inner, rgb(22, 24, 34));
+                int mid = (inner.y0 + inner.y1) / 2;
+                split_.text({inner.x0, mid - 24, inner.x1, mid + 24}, panes[i].label + (panes[i].looking ? L" is looking at the split screen" : L""), 22, rgb(170, 180, 200), false);
+            }
+            split_.fill({inner.x0, inner.y1 - 26, std::min(inner.x1, inner.x0 + 20 + int(panes[i].label.size()) * 11), inner.y1}, rgb(0, 0, 0));
+            split_.text({inner.x0 + 8, inner.y1 - 26, inner.x1, inner.y1}, panes[i].label, 18, rgb(240, 240, 245), true, 0);
+        }
+    }
+    void drawSplit() {
+        canvas_.blit(reinterpret_cast<const uint8_t*>(split_.pixels()), SCREEN_W, SCREEN_H, SCREEN_W * 4, {0, 0, SCREEN_W, SCREEN_H});
+        if (GetTickCount64() < splitBarUntil_) {
+            canvas_.fill({0, 0, SCREEN_W, 58}, rgb(24, 24, 28));
+            button(SPLIT_STOP, L"STOP", pressed_ == 830, rgb(140, 50, 50), 22);
+            button(SPLIT_MINE, L"\x25C0  MY TABLET", pressed_ == 831, rgb(50, 58, 84), 22);
+            int n = share_.viewers();
+            std::wstring c = share_.code();
+            canvas_.text({430, 0, SCREEN_W - 12, 58}, (c.empty() ? share_.lanCode() : c) + L"   -   " + std::to_wstring(n) + (n == 1 ? L" friend connected" : L" friends connected"),
+                         22, rgb(200, 210, 230), false, 0);
+        }
+    }
+    void splitTouch(const Touch& t) {
+        if (tapped(t, 830, SPLIT_STOP)) { share_.stop(); message_ = L"Split screen off."; toLauncher(); return; }
+        if (tapped(t, 831, SPLIT_MINE)) { toLauncher(); return; }  // it goes on; the SPLIT SCREEN tile comes back here
+        if (t.down && pressed_ < 0) splitBarUntil_ = GetTickCount64() + 6000;  // a tap anywhere brings the bar
+        if (!t.down) pressed_ = -1;
+    }
+    // My tablet for a friend's split screen: my screen, or, while I look at theirs, the app
+    // running under it (a video keeps playing); nothing while I only look.
+    void offerMyTablet() {
+        if (!watch_.split() || !watch_.connected()) return;
+        if (mode_ != Mode::Watch) { watch_.offerUp(reinterpret_cast<const uint8_t*>(screen_.pixels()), SCREEN_W, SCREEN_H, SCREEN_W * 4); return; }
+        if (session_.alive() && session_.capture().latest(upPixels_, upW_, upH_, upSerial_)) watch_.offerUp(upPixels_.data(), upW_, upH_, upW_ * 4);
+    }
+
     void drawPlexLink() {
         canvas_.clear(rgb(14, 16, 24));
         header(L"LINK PLEX", true);
@@ -2061,12 +2341,13 @@ private:
 
     void drawKeyboard() {
         canvas_.clear(rgb(14, 16, 24));
-        header(L"SEARCH YOUTUBE", true);
+        header(keyboardForWatch_ ? L"WATCH A FRIEND" : L"SEARCH YOUTUBE", true);
         canvas_.fill(QUERY_BOX, rgb(30, 34, 50));
         canvas_.frame(QUERY_BOX, current_.accent, 2);
         bool blink = GetTickCount64() / 500 % 2 == 0;
         canvas_.text({QUERY_BOX.x0 + 20, QUERY_BOX.y0, QUERY_BOX.x1 - 20, QUERY_BOX.y1},
-                     query_.empty() ? std::wstring(L"type a song, artist or video...") : query_ + (blink ? L"_" : L" "),
+                     query_.empty() ? std::wstring(keyboardForWatch_ ? L"type your friend's code (12 letters and digits)..." : L"type a song, artist or video...")
+                                    : (keyboardForWatch_ ? upper(query_) : query_) + (blink ? L"_" : L" "),
                      30, query_.empty() ? rgb(110, 118, 140) : rgb(250, 250, 255), !query_.empty(), 0);
         for (int row = 0; row < 4; row++)
             for (int col = 0; col < 10; col++)
@@ -2074,7 +2355,7 @@ private:
         button(KEY_DEL, L"\x25C0 DEL", pressed_ == 740, rgb(70, 50, 60), 24);
         button(KEY_SPACE, L"SPACE", pressed_ == 741, rgb(44, 50, 72), 24);
         button(KEY_CLEAR, L"CLEAR", pressed_ == 742, rgb(70, 50, 60), 24);
-        button(KEY_SEARCH, L"SEARCH", pressed_ == 743, rgb(170, 30, 40), 26);
+        button(KEY_SEARCH, keyboardForWatch_ ? L"CONNECT" : L"SEARCH", pressed_ == 743, keyboardForWatch_ ? rgb(40, 130, 200) : rgb(170, 30, 40), 26);
         messageBar();
     }
 
@@ -2109,6 +2390,8 @@ private:
     void drawCursor() {
         HWND window = session_.window();
         if (!window || (GetForegroundWindow() != window && !freeze_)) return;
+        CURSORINFO info{sizeof info};
+        if (GetForegroundWindow() == window && GetCursorInfo(&info) && !(info.flags & CURSOR_SHOWING)) return;  // in the world: the game hides it
         POINT p;
         RECT client{};
         POINT origin{0, 0};
@@ -2218,6 +2501,8 @@ private:
             case Mode::Keyboard: drawKeyboard(); break;
             case Mode::Screen: drawScreen(); break;
             case Mode::Media: drawMedia(); break;
+            case Mode::Watch: drawWatch(); break;
+            case Mode::Split: drawSplit(); break;
         }
         loadingOverlay();
         canvas_.opaque();
@@ -2249,6 +2534,18 @@ private:
     bool mcLight_ = true;               // SETTINGS > TABLET > Minecraft light settings
     bool skipAds_ = true;               // SETTINGS > TABLET > Skip YouTube ads (in the browser, in the background too)
     Thumbs thumbs_;                     // video pictures for the list pages
+    ShareServer share_;                 // SHARE MY TABLET / SPLIT SCREEN
+    ShareClient watch_;                 // WATCH A FRIEND
+    Canvas split_;                      // the split screen's picture (composeSplit)
+    uint64_t splitBarUntil_ = 0;
+    bool landing_ = false;              // tapped(): this touch is a new poke (see onTouch)
+    int heldCount_ = 0;                 // touch cells down right now
+    uint64_t firedAt_ = 0, lastTouchAt_ = 0;
+    std::vector<uint8_t> upPixels_;     // my app's picture for a friend's split screen
+    int upW_ = 0, upH_ = 0;
+    uint64_t upSerial_ = 0;
+    bool keyboardForWatch_ = false, watchRemembered_ = false;
+    uint64_t watchBarUntil_ = 0;
     MediaInfo mediaNow_;                // the MEDIA page
     std::wstring mediaApp_;
     float mediaVolume_ = -1;

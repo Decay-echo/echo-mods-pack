@@ -313,6 +313,8 @@ freeze_buttons=position
 ; 1 = the MOVIES tile instead of MINECRAFT on the launcher
 movies_tile=0
 balatro_port=55410
+; SHARE MY TABLET listens here (TCP); friends' codes carry it
+share_port=6730
 retroarch_command_port=55355
 retroarch_pad_port=55400
 
@@ -553,6 +555,23 @@ def install(game: Path):
     print('Start Echo VR normally, open the hand tablet and press the gamepad tab (far left); the gear tab (far right) is SETTINGS.')
 
 
+def firewall_rule():
+    """Windows Firewall lets friends reach SHARE MY TABLET (needs an elevated prompt; otherwise
+    Windows asks on the desktop the first time, or the LAN code is what works)."""
+    exe = ROOT / 'dist' / 'EchoArcade' / 'ArcadeHost.exe'
+    try:
+        r = subprocess.run(['netsh', 'advfirewall', 'firewall', 'add', 'rule', 'name=Echo Arcade tablet share',
+                            'dir=in', 'action=allow', f'program={exe}', 'protocol=TCP', 'localport=6730'],
+                           capture_output=True, text=True, timeout=20)
+        if r.returncode == 0:
+            print('Windows Firewall: friends may reach SHARE MY TABLET (rule added).')
+        else:
+            print('Windows Firewall: could not add the rule (run INSTALL as administrator once for that); '
+                  'Windows will ask on the desktop the first time you share.')
+    except Exception as e:  # noqa: BLE001
+        print(f'Windows Firewall: rule not added ({e}).')
+
+
 def update(game: Path):
     check_game(game)
     if not STATE.exists():
@@ -567,6 +586,7 @@ def update(game: Path):
     ensure_loader_entry(loader.setdefault('plugins', []))
     p['loader'].write_text(json.dumps(loader, indent=4) + '\n', encoding='utf-8')
     print('Updated EchoArcade.dll, ArcadeHost.exe and arcade.ini (tablet data unchanged).')
+    firewall_rule()
     check_echoloader(p)
     patch_retroarch()
 

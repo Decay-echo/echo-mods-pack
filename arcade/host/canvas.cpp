@@ -103,6 +103,7 @@ Config loadConfig() {
     GetPrivateProfileStringW(L"minecraft", L"look_speed", L"3", look, 32, ini.c_str());
     c.minecraftLook = float(std::clamp(_wtof(look), 0.5, 20.0));
     c.balatroPort = GetPrivateProfileIntW(L"host", L"balatro_port", c.balatroPort, ini.c_str());
+    c.sharePort = GetPrivateProfileIntW(L"host", L"share_port", c.sharePort, ini.c_str());
     c.retroCmdPort = GetPrivateProfileIntW(L"host", L"retroarch_command_port", c.retroCmdPort, ini.c_str());
     c.retroPadPort = GetPrivateProfileIntW(L"host", L"retroarch_pad_port", c.retroPadPort, ini.c_str());
     return c;

@@ -89,6 +89,8 @@ std::shared_ptr<Picture> decode(const std::vector<uint8_t>& bytes, int W, int H)
 
 }  // namespace
 
+std::vector<uint8_t> httpGetBytes(const std::wstring& url) { return httpGet(url); }
+
 Thumbs::Thumbs() {
     Gdiplus::GdiplusStartupInput input;
     Gdiplus::GdiplusStartup(&gdiplus_, &input, nullptr);

@@ -14,6 +14,9 @@ struct Picture {
     std::vector<uint8_t> bgra;
 };
 
+// GET over HTTP(S), at most 2 MB; empty on any failure (share.cpp asks the public address with it).
+std::vector<uint8_t> httpGetBytes(const std::wstring& url);
+
 class Thumbs {
 public:
     static constexpr int W = 104, H = 60;
