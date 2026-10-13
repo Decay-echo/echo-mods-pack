@@ -33,7 +33,7 @@ Only want one of them? `INSTALL.cmd --no-arcade` (HUD only) or `INSTALL.cmd --no
 - **Your games:** put ROMs you own in `arcade\apps\roms\<system>\` (the folder names are listed in `arcade\apps\roms\README.md`). They show up under RetroArch's **Playlists**.
 - **FREEZE** (top of the launcher): you're held still and your Touch controllers play RetroArch. Left stick = D-pad, right stick = analog, A/B/X/Y = face buttons, grips = L/R, triggers = L2/R2, left stick click = SELECT, right stick click = RetroArch menu, **menu button** = START. **Hold the menu button 1 second** to move again (the game pauses). It also switches off by itself when you change level.
 - **AUTO DOCK** (next to FREEZE) puts the arcade on the big lobby posters near you.
-- **Videos and YouTube** fill the whole tablet; the small **≡** at the top-right brings the controls or YouTube's toolbar back, and again puts them away.
+- **Videos and YouTube** fill the whole tablet; the small **≡** at the top-right brings the controls or YouTube's toolbar back, and again puts them away. While the tablet shows your YouTube window, it is kept on top of the desktop (Chrome blurs a covered window); it goes back when you close it on the tablet.
 
 Details: [arcade/README.md](arcade/README.md).
 

@@ -419,6 +419,12 @@ private:
         // A minimized window gives no picture: show it again, without taking focus from Echo VR.
         if (IsIconic(window)) ShowWindowAsync(window, SW_SHOWNOACTIVATE);
         if (!screenCap_.start(window)) { message_ = L"Could not capture the YouTube window (see host.log)."; return; }
+        // Covered by Echo VR's window, Chrome counts itself hidden and leaves the page at its
+        // blurry low-resolution rendering, which is what the capture then shows. On top of the
+        // desktop (still without focus) it renders the page fully; put back when the tablet
+        // lets go of it.
+        screenWasTopmost_ = (GetWindowLongW(window, GWL_EXSTYLE) & WS_EX_TOPMOST) != 0;
+        if (!screenWasTopmost_) SetWindowPos(window, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
         screenWin_ = window;
         screenTitle_ = youTubeWindowTitle(window);
         screenSerial_ = 0;
@@ -437,6 +443,8 @@ private:
     }
     void closeScreen() {
         screenCap_.stop();
+        if (screenWin_ && !screenWasTopmost_ && IsWindow(screenWin_))
+            SetWindowPos(screenWin_, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
         screenWin_ = nullptr;
         keyboardForScreen_ = false;
         tapAt_ = 0;
@@ -1746,7 +1754,7 @@ private:
     Rect pageShown_{};                  // where the page picture is on the tablet
     int cropX_ = 0, cropY_ = 0, cropW_ = 0, cropH_ = 0;  // the page's part of the capture
     int fingerX0_ = 0, fingerY0_ = 0, fingerX_ = 0, fingerY_ = 0;
-    bool docBusy_ = false, fingerDown_ = false, scrolled_ = false, keyboardForScreen_ = false, toolbar_ = false;
+    bool docBusy_ = false, fingerDown_ = false, scrolled_ = false, keyboardForScreen_ = false, toolbar_ = false, screenWasTopmost_ = false;
     std::string linkPin_;
     uint64_t linkStarted_ = 0, lastLinkPoll_ = 0, controlsUntil_ = 0, lastTimeline_ = 0;
     PlexItem plexItem_;
