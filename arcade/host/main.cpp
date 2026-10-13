@@ -116,7 +116,7 @@ public:
             if ((mode_ == Mode::Running || mode_ == Mode::Menu) && !session_.alive()) appClosed();
             pollFreeze(now);
             pollMinecraftFocus(now);
-            if (mode_ == Mode::Running && session_.windowless() > 30000) {
+            if (mode_ == Mode::Running && session_.windowless() > (session_.id() == AppId::EchoInner ? 120000u : 30000u)) {  // Echo loads for a while
                 message_ = L"It did not open a window in 30 s (see host.log).";
                 session_.kill();
                 appClosed();
@@ -869,9 +869,9 @@ private:
     }
     bool minecraftChooser() const { return !session_.alive() && current_.id == AppId::Minecraft && mode_ == Mode::Browse; }
     void startFreeze() {
-        bool mc = (session_.alive() && session_.id() == AppId::Minecraft) || minecraftChooser();
+        bool mc = (session_.alive() && isDesktop(session_.id())) || minecraftChooser();
         if (session_.alive() && !isRetro(session_.id()) && !mc) {
-            message_ = L"Freeze plays RetroArch or Minecraft: quit " + current_.title + L" first.";
+            message_ = L"Freeze plays RetroArch, Minecraft or Echo: quit " + current_.title + L" first.";
             return;
         }
         if (!session_.alive() && !mc) {
@@ -911,7 +911,7 @@ private:
         padHidden_ = false;
         releaseController();
         if (session_.alive() && isRetro(session_.id()) && session_.pauseRetro()) pausedByFreeze_ = true;
-        if (session_.id() == AppId::Minecraft) {  // Echo in front again: Minecraft pauses itself on losing the focus
+        if (isDesktop(session_.id())) {  // Echo in front again: Minecraft pauses itself on losing the focus
             mcInput_.releaseAll();
             if (!minecraft::focus(echoWindow())) hostLog("freeze: could not give Echo VR the focus back");
         }
@@ -931,7 +931,7 @@ private:
     void pollFreeze(uint64_t now) {
         if (!freeze_) return;
         if (shared_->levelSerial != freezeLevel_) { stopFreeze(L"New level: freeze is off and your game is paused."); return; }
-        bool mc = (session_.alive() && session_.id() == AppId::Minecraft) || minecraftChooser();
+        bool mc = (session_.alive() && isDesktop(session_.id())) || minecraftChooser();
         if (!mc && (!session_.alive() || !isRetro(session_.id()))) { stopFreeze(L"The game closed: freeze is off."); return; }
         if (!standalone_ && shared_->controllerState == arcade::ControllersReleased) {
             stopFreeze(L"Hands up: freeze is off and your game is paused.");
@@ -1485,7 +1485,7 @@ private:
             case Mode::Running:
                 if (isVideo(session_.id())) playerTouch(t);
                 else if (isRetro(session_.id())) retroTouch(t);
-                else if (session_.id() == AppId::Minecraft) minecraftTouch(t);
+                else if (isDesktop(session_.id())) minecraftTouch(t);
                 else balatroTouch(t);
                 break;
         }
@@ -1666,9 +1666,11 @@ private:
     }
 
     // ------------------------------------------------ drawing
+    bool compactTiles() const { return apps_.size() > 6; }  // seven or more tiles: three rows of shorter ones
     Rect tileRect(size_t i) const {
         int col = int(i % 3), row = int(i / 3);
-        return {20 + col * 332, 88 + row * 222, 20 + col * 332 + 320, 88 + row * 222 + 210};
+        int h = compactTiles() ? 150 : 210, step = compactTiles() ? 162 : 222;
+        return {20 + col * 332, 88 + row * step, 20 + col * 332 + 320, 88 + row * step + h};
     }
 
     void header(const std::wstring& title, bool backButton) {
@@ -1713,15 +1715,16 @@ private:
             canvas_.fill({r.x0, r.y0, r.x0 + 12, r.y1}, a.accent);
             canvas_.frame(r, on ? rgb(255, 255, 255) : rgb(50, 58, 84), on ? 4 : 2);
             size_t split = a.title.size() > 13 ? a.title.rfind(L' ', a.title.size() / 2 + 3) : std::wstring::npos;  // long names: two lines
+            int up = compactTiles() ? 12 : 0;  // shorter tiles: everything a little higher and tighter
             if (split == std::wstring::npos || split == 0) {
-                canvas_.text({r.x0 + 30, r.y0 + 26, r.x1 - 12, r.y0 + 96}, a.title, a.title.size() > 13 ? 28 : 40, rgb(245, 245, 250), true, 0);
+                canvas_.text({r.x0 + 30, r.y0 + 26 - up, r.x1 - 12, r.y0 + 96 - up}, a.title, a.title.size() > 13 ? 28 : 40, rgb(245, 245, 250), true, 0);
             } else {
-                canvas_.text({r.x0 + 30, r.y0 + 22, r.x1 - 12, r.y0 + 60}, a.title.substr(0, split), 28, rgb(245, 245, 250), true, 0);
-                canvas_.text({r.x0 + 30, r.y0 + 58, r.x1 - 12, r.y0 + 96}, a.title.substr(split + 1), 28, rgb(245, 245, 250), true, 0);
+                canvas_.text({r.x0 + 30, r.y0 + 22 - up, r.x1 - 12, r.y0 + 60 - up}, a.title.substr(0, split), 28, rgb(245, 245, 250), true, 0);
+                canvas_.text({r.x0 + 30, r.y0 + 58 - up, r.x1 - 12, r.y0 + 96 - up}, a.title.substr(split + 1), 28, rgb(245, 245, 250), true, 0);
             }
-            canvas_.text({r.x0 + 30, r.y0 + 96, r.x1 - 12, r.y0 + 134}, a.subtitle, 21, rgb(180, 190, 210), false, 0);
+            canvas_.text({r.x0 + 30, r.y0 + 96 - up, r.x1 - 12, r.y0 + 134 - up}, a.subtitle, compactTiles() ? 19 : 21, rgb(180, 190, 210), false, 0);
             if (!a.missing.empty())
-                canvas_.text({r.x0 + 30, r.y0 + 140, r.x1 - 12, r.y0 + 180}, a.missing, 17, rgb(255, 170, 90), false, 0);
+                canvas_.text({r.x0 + 30, r.y0 + (compactTiles() ? 118 : 140), r.x1 - 12, r.y0 + (compactTiles() ? 148 : 180)}, a.missing, 17, rgb(255, 170, 90), false, 0);
         }
         messageBar();
     }

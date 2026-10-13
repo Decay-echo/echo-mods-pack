@@ -470,6 +470,7 @@ void initialize() {
 void start(HMODULE self) {
     static std::once_flag once;
     std::call_once(once, [self] {
+        if (GetEnvironmentVariableW(L"ECHO_INNER", nullptr, 0)) return;  // a second Echo VR the arcade runs on the tablet: not for us
         wchar_t path[MAX_PATH];
         GetModuleFileNameW(self, path, MAX_PATH);
         pluginDir = path;

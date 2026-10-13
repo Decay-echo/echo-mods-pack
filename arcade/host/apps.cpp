@@ -134,6 +134,9 @@ std::vector<Launcher> minecraftLaunchers(const Config& c) {
     return out;
 }
 bool isVideo(AppId id) { return id == AppId::Movies || id == AppId::Plex || id == AppId::YouTube; }
+bool isDesktop(AppId id) { return id == AppId::Minecraft || id == AppId::EchoInner; }
+// The game this host runs inside: bin\win10 is two folders up from the plugin's own folder.
+std::wstring echoExe(const Config& c) { return folderOf(folderOf(c.dir)) + L"\\echovr.exe"; }
 int writePlaylists(const Config& c);  // playlists.cpp
 
 // Keep secrets (Plex tokens in stream URLs) out of logs.
@@ -182,6 +185,10 @@ std::vector<AppInfo> listApps(const Config& c) {
                         launchers.empty() ? L"No Minecraft launcher found (Java Edition)" : L"", rgb(92, 160, 64)});
     }
     // Shows the YouTube page open in your browser; with yt-dlp (setup_apps.py) also search and saved links.
+    // Echo in Echo: a second Echo VR in its desktop mode (-noovr: no headset, a flat window with
+    // mouse and keyboard), on the tablet like any other game. For the friends.
+    apps.push_back({AppId::EchoInner, L"ECHO VR", L"Echo in Echo (desktop mode) - FREEZE to play",
+                    exists(echoExe(c)) ? L"" : L"echovr.exe not found next to the plugin", rgb(230, 120, 40)});
     apps.push_back({AppId::YouTube, L"YOUTUBE", exists(c.ytdlp) ? L"Browser YouTube + search" : L"Your browser's YouTube",
                     L"", rgb(255, 48, 64)});
     games.insert(games.end(), apps.begin(), apps.end());
@@ -221,7 +228,16 @@ bool Session::launch(AppId id, const std::wstring& target, double startSeconds,
     AudioTarget audio = findAudioDevice(config_.audioDevice);
     auto setEnv = [](const wchar_t* k, const std::wstring& v) { SetEnvironmentVariableW(k, v.empty() ? nullptr : v.c_str()); };
     setEnv(L"ECHO_ARCADE_PORT", L"");
-    if (id == AppId::BalatroSteam) {
+    setEnv(L"ECHO_INNER", L"");
+    if (id == AppId::EchoInner) {
+        // A second Echo VR without a headset. ECHO_INNER keeps the pack's plugins (this one, the
+        // HUD, DiscButton) out of it: they would fight the first copy over the tablet and the
+        // headset. Its API goes on another port so the HUD keeps reading the real match.
+        exe = echoExe(config_);
+        cwd = folderOf(exe);
+        args = L"-noovr -httpport 6722";
+        setEnv(L"ECHO_INNER", L"1");
+    } else if (id == AppId::BalatroSteam) {
         exe = config_.love;
         cwd = config_.balatroSteam;
         // --fused makes LOVE use %APPDATA%\Balatro, i.e. the Steam game's own saves.
@@ -404,6 +420,8 @@ void Session::quit() {
         minecraft::Windows w = minecraft::find(pid_);
         if (w.game) PostMessageW(w.game, WM_CLOSE, 0, 0);
         if (w.launcher) PostMessageW(w.launcher, WM_CLOSE, 0, 0);
+    } else if (id_ == AppId::EchoInner) {
+        if (window_) PostMessageW(window_, WM_CLOSE, 0, 0);
     } else if (isVideo(id_)) mpv_.command(R"(["quit"])");
     else {
         const char msg[] = "quit";

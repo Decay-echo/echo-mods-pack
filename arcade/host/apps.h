@@ -6,7 +6,7 @@
 #include <deque>
 #include <thread>
 
-enum class AppId { BalatroSteam, DuckHunt, RetroArch, Doom, Movies, Plex, YouTube, OwnGame, Minecraft };
+enum class AppId { BalatroSteam, DuckHunt, RetroArch, Doom, Movies, Plex, YouTube, OwnGame, Minecraft, EchoInner };
 
 struct AppInfo {
     AppId id;
@@ -30,6 +30,7 @@ struct OwnGame {
 std::vector<OwnGame> ownGames(const Config& config, size_t most);
 bool isRetro(AppId id);
 bool isVideo(AppId id);
+bool isDesktop(AppId id);  // a desktop game on the tablet: taps are real clicks, FREEZE is keyboard and mouse (Minecraft, Echo in Echo)
 
 // RetroPad button ids (libretro RETRO_DEVICE_ID_JOYPAD_*).
 enum Pad { PadB = 0, PadY, PadSelect, PadStart, PadUp, PadDown, PadLeft, PadRight, PadA, PadX, PadL, PadR, PadL2, PadR2, PadL3, PadR3, PadCount };

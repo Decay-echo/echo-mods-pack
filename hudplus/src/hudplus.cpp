@@ -1043,6 +1043,7 @@ DWORD WINAPI install(LPVOID pluginPath) {
 void start(HMODULE self) {
     static std::once_flag once;
     std::call_once(once, [self] {
+        if (GetEnvironmentVariableW(L"ECHO_INNER", nullptr, 0)) return;  // a second Echo VR the arcade runs on the tablet: not for us
         auto* path = new wchar_t[MAX_PATH];
         GetModuleFileNameW(self, path, MAX_PATH);
         HANDLE t = CreateThread(nullptr, 0, install, path, 0, nullptr);
