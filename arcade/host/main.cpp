@@ -2,6 +2,7 @@
 // Owns the tablet UI (launcher, browsers, touch controls) and the running app;
 // exits when Echo VR goes away.
 #include "apps.h"
+#include "thumbs.h"
 #include "minecraft.h"
 #include "mod_settings.h"
 #include "touchpad.h"
@@ -73,12 +74,16 @@ std::wstring clock(double s) {
     return b;
 }
 
-enum class Mode { Launcher, Browse, PlexLink, Running, Menu, Keyboard, Screen };
+enum class Mode { Launcher, Browse, PlexLink, Running, Menu, Keyboard, Screen, Media };
+// The MEDIA page: now playing, then play / skip, then volume.
+const Rect MEDIA_PREV{40, 230, 320, 330}, MEDIA_PLAY{372, 230, 652, 330}, MEDIA_NEXT{704, 230, 984, 330};
+const Rect MEDIA_VOLDOWN{40, 360, 320, 460}, MEDIA_MUTE{372, 360, 652, 460}, MEDIA_VOLUP{704, 360, 984, 460};
 #define canvas_ (*target_)  // the canvas being drawn: the tablet screen, or its 2x copy for the poster
 
 struct Entry {
     std::wstring label, sub;
     std::function<void()> open;
+    std::wstring thumb;  // a picture's URL (video lists), drawn at the row's left when it is there
 };
 struct Screen {
     std::wstring title;
@@ -91,6 +96,8 @@ public:
     Host(arcade::Shared* shared, bool standalone)
         : shared_(shared), standalone_(standalone), config_(loadConfig()), session_(config_), lightGun_(config_) {
         readPos_ = shared_->touchWrite;
+        ytSetDeno(exists(config_.deno) ? config_.deno : L"");
+        if (exists(config_.ytdlp) && !exists(config_.deno)) hostLog("youtube: no Deno (%ls): YouTube searches may fail; rerun the installer", config_.deno.c_str());
         apps_ = listApps(config_);
         loadSettings();
         buildPages();
@@ -130,6 +137,8 @@ public:
             if (mode_ == Mode::PlexLink) pollPlexLink(now);
             reportPlexProgress(now);
             pollScreen(now);
+            pollMedia(now);
+            pollAds(now);
             pollDock();
             autoDock(now);
             if (shotUpAt_ && now >= shotUpAt_) { shotUpAt_ = 0; onTouch({SHOT_TOUCH, false, shotX_, shotY_}); }
@@ -224,6 +233,7 @@ private:
         if (app.id == AppId::Movies) { openMovies(); return; }
         if (app.id == AppId::Plex) { openPlex(); return; }
         if (app.id == AppId::YouTube) { openYouTube(); return; }
+        if (app.id == AppId::Media) { openMedia(); return; }
         if (app.id == AppId::Minecraft) { openMinecraft(); return; }
         if (!session_.launch(app.id, app.rom, 0, {}, 0, app.core)) { message_ = L"Could not start " + app.title + L" (see host.log)."; return; }
         gunUsed_ = false;
@@ -452,12 +462,15 @@ private:
     void openYouTube() {
         if (GetFileAttributesW(config_.ytdlp.c_str()) == INVALID_FILE_ATTRIBUTES) { openScreen(); return; }
         Screen s{L"YOUTUBE"};
-        s.entries.push_back({L"YOUTUBE ON THIS PC", L"The YouTube page open in your browser, with touch controls", [this] { openScreen(); }});
+        s.entries.push_back({L"HOME", exists(youTubeCookies()) ? L"Your recommendations (signed in through youtube_cookies.txt)"
+                                                                : L"Videos for the topics in youtube_home.txt (export cookies for your own feed)",
+                             [this] { openYouTubeHome(); }});
         s.entries.push_back({L"SEARCH YOUTUBE", L"Type with the on-screen keyboard", [this] { mode_ = Mode::Keyboard; resetInput(); }});
         for (auto& link : loadYouTubeLinks(config_.youtubeLinks)) {
             if (link.playlist) s.entries.push_back({L"\x25B8  " + link.name, L"Playlist / mix - tap to see the videos", [this, link] { openYouTubeList(link); }});
             else s.entries.push_back({link.name, L"Video", [this, link] { playYouTube({link.url}, 0, link.name); }});
         }
+        s.entries.push_back({L"YOUTUBE ON THIS PC", L"The YouTube page open in your browser, with touch controls", [this] { openScreen(); }});
         s.entries.push_back({L"Update yt-dlp", L"Tap this if videos stop playing (YouTube changes often)", [this] { updateYtdlp(); }});
         std::wstring file = config_.youtubeLinks;  // shown as its folder and name, e.g. apps\youtube.txt
         size_t cut = file.find_last_of(L"\\/");
@@ -465,6 +478,45 @@ private:
         if (cut != std::wstring::npos) file = file.substr(cut + 1);
         s.entries.push_back({L"Add your own links", L"On the PC, edit " + file + L"  -  one per line:  Name | link", nullptr});
         push(s);
+    }
+    std::wstring youTubeFolder() const { return parent(config_.youtubeLinks); }
+    std::wstring youTubeCookies() const { return youTubeFolder() + L"\\youtube_cookies.txt"; }
+    // HOME: the signed-in feed when a cookies file is there, else a page built from searches for the
+    // topics in youtube_home.txt (one a line; a few topics by default).
+    void openYouTubeHome() {
+        std::wstring ytdlp = config_.ytdlp, cookies = youTubeCookies();
+        std::vector<std::wstring> topics;
+        std::string text;
+        if (readFile(youTubeFolder() + L"\\youtube_home.txt", text)) {
+            std::wstring all = widenUtf8(text), line;
+            for (size_t i = 0; i <= all.size(); i++) {
+                if (i < all.size() && all[i] != L'\n') { line += all[i]; continue; }
+                while (!line.empty() && (line.back() == L'\r' || line.back() == L' ')) line.pop_back();
+                if (!line.empty() && line[0] != L'#') topics.push_back(line);
+                line.clear();
+            }
+        }
+        if (topics.empty()) topics = {L"music", L"gaming", L"echo vr"};
+        bool signedIn = exists(cookies);
+        async([this, ytdlp, cookies, topics, signedIn] {
+            Screen s{L"YOUTUBE HOME"};
+            std::wstring error;
+            if (signedIn) {
+                std::vector<YtVideo> found;
+                if (ytFeed(ytdlp, cookies, found, error))
+                    for (auto& v : found) s.entries.push_back({v.title, v.info, [this, v] { playYouTube({v.url}, 0, v.title); }, v.thumb});
+                else s.entries.push_back({L"Could not read your feed", error, nullptr});
+            } else {
+                for (auto& topic : topics) {
+                    std::vector<YtVideo> found;
+                    if (!ytSearch(ytdlp, topic, found, error, 6)) { s.entries.push_back({topic, L"search failed: " + error, nullptr}); continue; }
+                    s.entries.push_back({L"\x25B8  " + topic, L"", nullptr});
+                    for (auto& v : found) s.entries.push_back({v.title, v.info, [this, v] { playYouTube({v.url}, 0, v.title); }, v.thumb});
+                }
+            }
+            if (s.entries.empty()) s.entries.push_back({L"Nothing found", error, nullptr});
+            return std::function<void()>([this, s] { push(s); });
+        }, L"Loading YouTube home");
     }
     void openYouTubeList(const YtLink& link) {
         std::wstring ytdlp = config_.ytdlp;
@@ -482,7 +534,7 @@ private:
                                          [this, urls, link] { playYouTube(urls, 0, link.name); }});
                 for (size_t i = 0; i < found.size(); i++) {
                     auto v = found[i];
-                    s.entries.push_back({v.title, v.info, [this, urls, i, v] { playYouTube(urls, int(i), v.title); }});
+                    s.entries.push_back({v.title, v.info, [this, urls, i, v] { playYouTube(urls, int(i), v.title); }, v.thumb});
                 }
                 if (found.empty()) s.entries.push_back({L"This playlist is empty", L"", nullptr});
                 push(s);
@@ -598,11 +650,6 @@ private:
     void pollScreen(uint64_t now) {
         if (!screenWin_) return;  // also while its search keyboard is up
         if (!IsWindow(screenWin_)) { message_ = L"The YouTube window closed."; closeScreen("the window is gone"); return; }
-        if (IsIconic(screenWin_) && now - lastUnminimize_ > 3000) {  // minimized: nothing to capture
-            lastUnminimize_ = now;
-            ShowWindowAsync(screenWin_, SW_SHOWNOACTIVATE);
-            hostLog("youtube: the window was minimized; showing it again (without the focus)");
-        }
         if (now - lastTitlePoll_ > 500) {
             lastTitlePoll_ = now;
             screenTitle_ = youTubeWindowTitle(screenWin_);
@@ -661,6 +708,20 @@ private:
                 pageTap(window, at);
             }
         }
+    }
+    // Ads skipped in the browser's YouTube whether the tablet shows it or not (the Skip button is
+    // pressed as soon as YouTube offers it); SETTINGS > TABLET turns it off.
+    void pollAds(uint64_t now) {
+        if (!skipAds_ || mode_ == Mode::Screen || adBusy_ || now - lastAdCheck_ < 1200) return;  // the screen does its own
+        lastAdCheck_ = now;
+        HWND window = findYouTubeWindow();
+        if (!window) return;
+        adBusy_ = true;
+        spawn([this, window] {
+            bool skipped = skipYouTubeAd(window);
+            std::lock_guard<std::mutex> lock(pendingLock_);
+            pending_.push_back([this, skipped] { adBusy_ = false; if (skipped) hostLog("youtube: ad skipped in the browser (in the background)"); });
+        });
     }
     void screenCommand(MediaCommand command, double to = 0) {
         std::wstring title = screenTitle_;
@@ -1052,6 +1113,14 @@ private:
         swprintf(buf, 32, format, v);
         return buf;
     }
+    static std::wstring widenUtf8(const std::string& s) {
+        if (s.empty()) return {};
+        int n = MultiByteToWideChar(CP_UTF8, 0, s.data(), int(s.size()), nullptr, 0);
+        std::wstring w(size_t(n), L'\0');
+        MultiByteToWideChar(CP_UTF8, 0, s.data(), int(s.size()), w.data(), n);
+        if (!w.empty() && w[0] == 0xFEFF) w.erase(0, 1);
+        return w;
+    }
     static bool readFile(const std::wstring& path, std::string& out) {
         FILE* f = nullptr;
         if (_wfopen_s(&f, path.c_str(), L"rb") != 0 || !f) return false;
@@ -1102,7 +1171,10 @@ private:
         shared_->tabletScale = LONG(std::clamp(iniFloat(t, L"tablet", L"scale", 1.f), .5f, 4.f) * 1000);
         autoDock_ = GetPrivateProfileIntW(L"dock", L"auto", 1, t.c_str()) != 0;  // on unless turned off
         posterHq_ = _wcsicmp(iniText(t, L"poster", L"quality", L"normal").c_str(), L"high") == 0;
+        skipAds_ = GetPrivateProfileIntW(L"youtube", L"skip_ads", 1, t.c_str()) != 0;
         session_.setWindowScale(posterHq_ ? 2 : 1);
+        mcLight_ = GetPrivateProfileIntW(L"minecraft", L"light", 1, t.c_str()) != 0;
+        session_.setMinecraftLight(mcLight_);
         std::wstring buttons = iniText(t, L"freeze", L"buttons", L"");          // the tablet's choice beats arcade.ini
         if (!buttons.empty()) config_.freezeButtons = buttons;
         std::wstring yt = iniText(t, L"youtube", L"audio", L"");
@@ -1153,6 +1225,19 @@ private:
                                  : L"Poster quality NORMAL: from the next dock.";
         };
         tablet.options.push_back(quality);
+        Option light{L"Minecraft light settings", L"When Minecraft starts: render distance 8, simulation 6, no clouds or entity shadows (only ever lowered), so Echo keeps its frames", Kind::Toggle};
+        light.get = [this] { return mcLight_ ? 1.f : 0.f; };
+        light.set = [this, tweaks](float v) {
+            mcLight_ = v != 0;
+            session_.setMinecraftLight(mcLight_);
+            iniWrite(tweaks, L"minecraft", L"light", mcLight_ ? L"1" : L"0");
+            message_ = mcLight_ ? L"Minecraft light settings: applied the next time Minecraft starts." : L"Minecraft keeps its own video settings from its next start.";
+        };
+        tablet.options.push_back(light);
+        Option ads{L"Skip YouTube ads", L"In your browser's YouTube, the Skip button is pressed for you as soon as it appears", Kind::Toggle};
+        ads.get = [this] { return skipAds_ ? 1.f : 0.f; };
+        ads.set = [this, tweaks](float v) { skipAds_ = v != 0; iniWrite(tweaks, L"youtube", L"skip_ads", skipAds_ ? L"1" : L"0"); };
+        tablet.options.push_back(ads);
         Option buttons{L"FREEZE buttons", L"Touch A B X Y on the game pad: by place (like an Xbox pad) or by name", Kind::Choice};
         buttons.choices = {L"BY PLACE", L"BY NAME"};
         buttons.get = [this] { return config_.freezeButtons == L"labels" ? 1.f : 0.f; };
@@ -1579,6 +1664,7 @@ private:
             case Mode::Menu: menuTouch(t); break;
             case Mode::Keyboard: keyboardTouch(t); break;
             case Mode::Screen: screenTouch(t); break;
+            case Mode::Media: mediaTouch(t); break;
             case Mode::Running:
                 if (isVideo(session_.id())) playerTouch(t);
                 else if (isRetro(session_.id())) retroTouch(t);
@@ -1843,16 +1929,83 @@ private:
             bool on = pressed_ == i;
             canvas_.fill(r, on ? rgb(56, 64, 92) : rgb(30, 34, 50));
             canvas_.fill({r.x0, r.y0, r.x0 + 8, r.y1}, current_.accent);
-            if (e.sub.empty()) canvas_.text({r.x0 + 24, r.y0, r.x1 - 12, r.y1}, e.label, 26, rgb(240, 240, 245), true, 0);
+            int tx = r.x0 + 24;
+            if (!e.thumb.empty()) {  // a video: its picture at the left (fetched while the page is up)
+                Rect box{r.x0 + 14, r.y0 + 3, r.x0 + 14 + Thumbs::W, r.y0 + 3 + Thumbs::H};
+                auto pic = thumbs_.get(e.thumb);
+                if (pic && pic->w) canvas_.blit(pic->bgra.data(), pic->w, pic->h, pic->w * 4, box);
+                else canvas_.fill(box, rgb(40, 44, 60));
+                tx = box.x1 + 14;
+            }
+            if (e.sub.empty()) canvas_.text({tx, r.y0, r.x1 - 12, r.y1}, e.label, 26, rgb(240, 240, 245), true, 0);
             else {
-                canvas_.text({r.x0 + 24, r.y0 + 4, r.x1 - 12, r.y0 + 40}, e.label, 25, rgb(240, 240, 245), true, 0);
-                canvas_.text({r.x0 + 24, r.y0 + 38, r.x1 - 12, r.y1 - 2}, e.sub, 18, rgb(160, 170, 190), false, 0);
+                canvas_.text({tx, r.y0 + 4, r.x1 - 12, r.y0 + 40}, e.label, 25, rgb(240, 240, 245), true, 0);
+                canvas_.text({tx, r.y0 + 38, r.x1 - 12, r.y1 - 2}, e.sub, 18, rgb(160, 170, 190), false, 0);
             }
         }
         button(PAGE_UP, L"\x25B2", pressed_ == 101, s.page > 0 ? rgb(50, 58, 84) : rgb(28, 30, 40), 36);
         button(PAGE_DOWN, L"\x25BC", pressed_ == 102, s.page < pages - 1 ? rgb(50, 58, 84) : rgb(28, 30, 40), 36);
         canvas_.text({12, 528, 904, 574}, L"page " + std::to_wstring(s.page + 1) + L" of " + std::to_wstring(pages) + L"   -   " +
                      std::to_wstring(s.entries.size()) + L" items", 18, rgb(130, 140, 160), false, 0);
+        messageBar();
+    }
+
+    // ---- MEDIA: whatever plays on this PC (Spotify, a browser, mpv...), through Windows' media
+    // sessions, and the master volume.
+    void openMedia() {
+        mode_ = Mode::Media;
+        lastMediaPage_ = 0;
+        resetInput();
+    }
+    void pollMedia(uint64_t now) {
+        if (mode_ != Mode::Media || mediaPageBusy_ || now - lastMediaPage_ < 1000) return;
+        lastMediaPage_ = now;
+        mediaPageBusy_ = true;
+        spawn([this] {
+            std::wstring app;
+            MediaInfo info = mediaNowPlaying(app);
+            float volume = masterVolume();
+            bool muted = masterMuted();
+            std::lock_guard<std::mutex> lock(pendingLock_);
+            pending_.push_back([this, info, app, volume, muted] { mediaNow_ = info; mediaApp_ = app; mediaVolume_ = volume; mediaMuted_ = muted; mediaPageBusy_ = false; });
+        });
+    }
+    void mediaTouch(const Touch& t) {
+        if (tapped(t, 100, BACK_BUTTON)) { toLauncher(); return; }
+        MediaCommand command;
+        bool control = false;
+        if (tapped(t, 900, MEDIA_PREV)) { command = MediaCommand::Previous; control = true; }
+        else if (tapped(t, 901, MEDIA_PLAY)) { command = MediaCommand::PlayPause; control = true; }
+        else if (tapped(t, 902, MEDIA_NEXT)) { command = MediaCommand::Next; control = true; }
+        else if (tapped(t, 903, MEDIA_VOLDOWN)) { setMasterVolume(std::max(0.f, mediaVolume_ - .05f)); lastMediaPage_ = 0; }
+        else if (tapped(t, 904, MEDIA_MUTE)) { toggleMasterMute(); lastMediaPage_ = 0; }
+        else if (tapped(t, 905, MEDIA_VOLUP)) { setMasterVolume(std::min(1.f, mediaVolume_ + .05f)); lastMediaPage_ = 0; }
+        else if (!t.down) pressed_ = -1;
+        if (control) spawn([this, command] {
+            bool ok = mediaControl(command);
+            std::lock_guard<std::mutex> lock(pendingLock_);
+            pending_.push_back([this, ok] { if (!ok) message_ = L"Nothing is playing that Windows can control."; lastMediaPage_ = 0; });
+        });
+    }
+    void drawMedia() {
+        canvas_.clear(rgb(14, 16, 24));
+        header(L"MEDIA", true);
+        if (mediaNow_.valid) {
+            canvas_.text({40, 96, SCREEN_W - 40, 140}, mediaNow_.title.empty() ? L"(no title)" : mediaNow_.title, 30, rgb(245, 245, 250), true, 0);
+            canvas_.text({40, 140, SCREEN_W - 40, 172}, mediaNow_.artist, 22, rgb(180, 190, 210), false, 0);
+            canvas_.text({40, 172, SCREEN_W - 40, 200}, (mediaNow_.playing ? L"playing  -  " : L"paused  -  ") + mediaApp_, 18, rgb(130, 140, 160), false, 0);
+        } else {
+            canvas_.text({40, 96, SCREEN_W - 40, 140}, L"Nothing is playing", 30, rgb(200, 205, 220), true, 0);
+            canvas_.text({40, 140, SCREEN_W - 40, 172}, L"Start Spotify, a YouTube video in your browser, or a video here, and it shows up.", 20, rgb(150, 160, 180), false, 0);
+        }
+        button(MEDIA_PREV, L"\x25C0\x25C0  PREV", pressed_ == 900, rgb(50, 58, 84), 26);
+        button(MEDIA_PLAY, mediaNow_.valid && mediaNow_.playing ? L"PAUSE" : L"PLAY", pressed_ == 901, rgb(40, 110, 60), 26);
+        button(MEDIA_NEXT, L"NEXT  \x25B6\x25B6", pressed_ == 902, rgb(50, 58, 84), 26);
+        button(MEDIA_VOLDOWN, L"VOL \x2212", pressed_ == 903, rgb(50, 58, 84), 26);
+        button(MEDIA_MUTE, mediaMuted_ ? L"UNMUTE" : L"MUTE", pressed_ == 904, mediaMuted_ ? rgb(150, 50, 50) : rgb(50, 58, 84), 26);
+        button(MEDIA_VOLUP, L"VOL +", pressed_ == 905, rgb(50, 58, 84), 26);
+        std::wstring vol = mediaVolume_ < 0 ? L"Volume: ?" : L"Volume " + std::to_wstring(int(mediaVolume_ * 100 + .5f)) + L"%" + (mediaMuted_ ? L"  (muted)" : L"");
+        canvas_.text({0, 480, SCREEN_W, 520}, vol, 24, rgb(90, 200, 255));
         messageBar();
     }
 
@@ -2064,6 +2217,7 @@ private:
             case Mode::Menu: drawMenu(); break;
             case Mode::Keyboard: drawKeyboard(); break;
             case Mode::Screen: drawScreen(); break;
+            case Mode::Media: drawMedia(); break;
         }
         loadingOverlay();
         canvas_.opaque();
@@ -2092,6 +2246,14 @@ private:
     Canvas hq_{int(arcade::HQ_WIDTH), int(arcade::HQ_HEIGHT), 2.f};  // the same at 2x (poster quality HIGH, while docked)
     Canvas* target_ = &screen_;
     bool posterHq_ = false;             // SETTINGS > TABLET > Poster quality
+    bool mcLight_ = true;               // SETTINGS > TABLET > Minecraft light settings
+    bool skipAds_ = true;               // SETTINGS > TABLET > Skip YouTube ads (in the browser, in the background too)
+    Thumbs thumbs_;                     // video pictures for the list pages
+    MediaInfo mediaNow_;                // the MEDIA page
+    std::wstring mediaApp_;
+    float mediaVolume_ = -1;
+    bool mediaMuted_ = false, mediaPageBusy_ = false;
+    uint64_t lastMediaPage_ = 0;
     Plex plex_;
     std::vector<AppInfo> apps_;
     AppInfo current_{};

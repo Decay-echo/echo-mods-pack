@@ -492,6 +492,16 @@ void start(HMODULE self) {
         if (GetPrivateProfileIntW(L"cpu", L"echo_above_normal", 1, (pluginDir + L"\\EchoArcade\\echo_tweaks.ini").c_str()) != 0) {
             bool ok = SetPriorityClass(GetCurrentProcess(), ABOVE_NORMAL_PRIORITY_CLASS) != FALSE;
             logf("cpu: Echo VR %s above-normal priority", ok ? "runs at" : "could not get");
+            // The GPU's scheduling too (D3DKMTSetProcessSchedulingPriorityClass, 3 = above
+            // normal): Windows only grants it to a process with the increase-base-priority
+            // privilege (Echo started as administrator); otherwise the arcade's host puts the
+            // desktop games below normal instead, which gets the same order.
+            using GpuFn = LONG(NTAPI*)(HANDLE, int);
+            HMODULE gdi = LoadLibraryW(L"gdi32.dll");
+            GpuFn gpu = gdi ? reinterpret_cast<GpuFn>(GetProcAddress(gdi, "D3DKMTSetProcessSchedulingPriorityClass")) : nullptr;
+            LONG status = gpu ? gpu(GetCurrentProcess(), 3) : -1;
+            logf("gpu: Echo VR %s above-normal GPU priority%s", status >= 0 ? "runs at" : "keeps normal",
+                 status >= 0 ? "" : " (above normal needs administrator; the tablet's desktop games go below normal instead)");
         }
         tablet::start(pluginDir);
         // Hooks and the probe D3D12 device are created off the loader thread.

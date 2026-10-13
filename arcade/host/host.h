@@ -24,6 +24,10 @@ struct AudioTarget { std::wstring id, name; };
 AudioTarget findAudioDevice(const std::wstring& patterns);
 bool routeProcessAudio(DWORD pid, const AudioTarget& target);  // that process's default output
 bool clearProcessAudio(DWORD pid);                              // that choice forgotten: Windows' default device again
+float masterVolume();                  // the default output device's volume 0..1 (-1 = could not read)
+bool setMasterVolume(float level);
+bool masterMuted();
+bool toggleMasterMute();
 bool setProcessVolume(DWORD pid, const AudioTarget& target, float level);  // its own volume there, 0..1 (once it plays)
 extern thread_local long lastAudioError;                        // HRESULT of the last failed route
 std::wstring localAppData();  // %LOCALAPPDATA%, even when the variable is missing
@@ -40,6 +44,7 @@ struct Config {
     std::wstring roms;                // RetroArch's Load Content start folder
     std::wstring mpv;                 // mpv.exe
     std::wstring ytdlp;               // yt-dlp.exe (YouTube; mpv plays what it finds)
+    std::wstring deno;                // deno.exe: the JavaScript runtime yt-dlp needs for YouTube
     std::wstring youtubeLinks;        // your saved YouTube links, one "Name | link" per line
     std::vector<std::wstring> movies; // video folders (arcade.ini movies=, ; separated)
     std::wstring windowMode;          // "desktop" (default) or "offscreen"

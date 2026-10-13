@@ -28,6 +28,8 @@ RETROARCH = 'https://buildbot.libretro.com/stable/1.22.2/windows/x86_64/RetroArc
 # Latest on purpose: YouTube changes often and old yt-dlp versions stop working. The YOUTUBE
 # tile has an "Update yt-dlp" entry for later updates (yt-dlp -U).
 YTDLP = 'https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe'
+# YouTube needs a JavaScript runtime in yt-dlp now; Deno is the one yt-dlp recommends.
+DENO = 'https://github.com/denoland/deno/releases/latest/download/deno-x86_64-pc-windows-msvc.zip'
 # Must match SYSTEMS in host/playlists.cpp (folder -> core).
 SYSTEMS = {
     'atari2600': 'stella', 'atari7800': 'prosystem', 'lynx': 'handy',
@@ -158,6 +160,10 @@ def main():
             inner.unlink()
     (APPS / 'movies').mkdir(exist_ok=True)
     fetch(YTDLP, APPS / 'mpv/yt-dlp.exe')
+    if not (APPS / 'deno/deno.exe').exists():
+        deno_zip = fetch(DENO, DL / 'deno-x86_64-pc-windows-msvc.zip')
+        (APPS / 'deno').mkdir(exist_ok=True)
+        zipfile.ZipFile(deno_zip).extractall(APPS / 'deno')
 
     ra = fetch(RETROARCH, DL / 'RetroArch.7z')
     if not (APPS / 'retroarch/retroarch.exe').exists():

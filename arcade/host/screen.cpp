@@ -98,6 +98,40 @@ std::wstring youTubeWindowTitle(HWND window) {
     return t == L"YouTube" ? std::wstring() : t;
 }
 
+MediaInfo mediaNowPlaying(std::wstring& app) {
+    MediaInfo info;
+    app.clear();
+    try {
+        auto s = manager().GetCurrentSession();
+        if (!s) return info;
+        std::wstring id = std::wstring(s.SourceAppUserModelId());
+        size_t cut = id.find_last_of(L"\\/");
+        if (cut != std::wstring::npos) id.erase(0, cut + 1);
+        if (id.size() > 4 && _wcsicmp(id.c_str() + id.size() - 4, L".exe") == 0) id.resize(id.size() - 4);
+        if (size_t bang = id.find(L'!'); bang != std::wstring::npos) id.resize(bang);  // a Store app's "Package!App"
+        app = id;
+        auto props = s.TryGetMediaPropertiesAsync().get();
+        info.title = props.Title();
+        info.artist = props.Artist();
+        info.playing = s.GetPlaybackInfo().PlaybackStatus() == GlobalSystemMediaTransportControlsSessionPlaybackStatus::Playing;
+        info.valid = true;
+    } catch (...) {}
+    return info;
+}
+
+bool mediaControl(MediaCommand command) {
+    try {
+        auto s = manager().GetCurrentSession();
+        if (!s) return false;
+        switch (command) {
+            case MediaCommand::PlayPause: return s.TryTogglePlayPauseAsync().get();
+            case MediaCommand::Next: return s.TrySkipNextAsync().get();
+            case MediaCommand::Previous: return s.TrySkipPreviousAsync().get();
+            default: return false;
+        }
+    } catch (...) { return false; }
+}
+
 MediaInfo mediaInfo(const std::wstring& title) {
     MediaInfo info;
     try {

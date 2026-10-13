@@ -6,7 +6,7 @@
 #include <deque>
 #include <thread>
 
-enum class AppId { BalatroSteam, DuckHunt, RetroArch, Doom, Movies, Plex, YouTube, OwnGame, Minecraft, EchoInner };
+enum class AppId { BalatroSteam, DuckHunt, RetroArch, Doom, Movies, Plex, YouTube, OwnGame, Minecraft, EchoInner, Media };
 
 struct AppInfo {
     AppId id;
@@ -52,6 +52,7 @@ public:
     Rect contentRect() const;    // where the app goes on the tablet screen
     Rect windowRect() const;     // the window's size: that, times the window scale (2 for poster quality HIGH)
     void setWindowScale(int s) { windowScale_ = s < 1 ? 1 : s; }
+    void setMinecraftLight(bool light) { minecraftLight_ = light; }  // SETTINGS > TABLET > Minecraft light settings
     WindowCapture& capture() { return capture_; }
     void quit();                 // polite request, then forced after a grace period
     void kill();
@@ -87,6 +88,8 @@ private:
     bool minecraftAlive_ = false;   // Minecraft: its windows are still up (the launcher process may be gone)
     HWND minecraftGame_ = nullptr;  // the game's own window, once it is up
     std::wstring minecraftName_;    // the launcher chosen (its windows are found by that name)
+    bool minecraftLight_ = true;
+    DWORD gpuLoweredPid_ = 0;       // the game whose GPU work was put behind Echo's
     // Every process this session put on the tablet (the one it started, a launcher's, the
     // game's): all ended on kill(), and by the watchdog if the host dies first (Echo closing).
     std::vector<DWORD> owned_;

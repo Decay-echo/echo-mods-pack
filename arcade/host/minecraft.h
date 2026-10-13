@@ -33,9 +33,15 @@ inline std::wstring findLauncher(const std::wstring& configured) {
     return L"";
 }
 
-// Before the game starts, two lines of Minecraft's options.txt: not full screen (it would take
-// the whole monitor at its resolution) and paused when it loses focus (FREEZE off = paused).
-inline void prepareOptions() {
+// Before the game starts, Minecraft's options.txt: not full screen (it would take the whole
+// monitor at its resolution), paused when it loses focus (FREEZE off = paused), and its frame
+// rate at the tablet's own (60 a second; the tablet never shows more, so more would only take
+// the GPU from Echo; vsync off, since Minecraft ignores the cap with vsync on). With `light`
+// (SETTINGS > TABLET > Minecraft light settings), the settings a small PC chokes on are capped
+// too: render distance 8, simulation distance 6, no clouds, no entity shadows (only ever
+// lowered; raise them in Minecraft with the toggle off).
+constexpr int TABLET_FPS = 60;
+inline void prepareOptions(bool light) {
     wchar_t path[MAX_PATH];
     if (!ExpandEnvironmentStringsW(L"%APPDATA%\\.minecraft\\options.txt", path, MAX_PATH)) return;
     FILE* f = nullptr;
@@ -55,23 +61,36 @@ inline void prepareOptions() {
         if (end < text.size() || !line.empty()) lines.push_back(line);
         at = end + 1;
     }
-    bool changed = false, sawPause = false;
-    for (auto& line : lines) {
-        std::string key = line.substr(0, line.find(':'));
-        if (key == "fullscreen" && line != "fullscreen:false") { line = "fullscreen:false"; changed = true; }
-        if (key == "pauseOnLostFocus") {
-            sawPause = true;
-            if (line != "pauseOnLostFocus:true") { line = "pauseOnLostFocus:true"; changed = true; }
+    bool changed = false;
+    std::string report;
+    // key -> wanted value; a capped one (max > 0) is only lowered
+    struct Want { const char* key; std::string value; int max; bool always; };
+    std::vector<Want> wants = {{"fullscreen", "false", 0, true}, {"pauseOnLostFocus", "true", 0, true},
+                               {"maxFps", std::to_string(TABLET_FPS), 0, true}, {"enableVsync", "false", 0, true}};
+    if (light)
+        wants.insert(wants.end(), {{"renderDistance", "8", 8, false}, {"simulationDistance", "6", 6, false},
+                                   {"renderClouds", "false", 0, false}, {"entityShadows", "false", 0, false}});
+    for (auto& w : wants) {
+        bool seen = false;
+        for (auto& line : lines) {
+            if (line.substr(0, line.find(':')) != w.key) continue;
+            seen = true;
+            std::string value = line.substr(line.find(':') + 1);
+            if (w.max > 0 && atoi(value.c_str()) <= w.max) break;  // already low enough
+            if (value == w.value) break;
+            line = std::string(w.key) + ":" + w.value;
+            changed = true;
+            report += std::string(report.empty() ? "" : ", ") + w.key + " " + value + " -> " + w.value;
         }
+        if (!seen && w.always) { lines.push_back(std::string(w.key) + ":" + w.value); changed = true; report += std::string(report.empty() ? "" : ", ") + w.key + " " + w.value; }
     }
-    if (!sawPause) { lines.push_back("pauseOnLostFocus:true"); changed = true; }
     if (!changed) return;
     std::string out;
     for (auto& line : lines) out += line + sep;
     if (_wfopen_s(&f, path, L"wb") == 0 && f) {
         fwrite(out.data(), 1, out.size(), f);
         fclose(f);
-        hostLog("minecraft: options.txt: fullscreen off, pause on lost focus on");
+        hostLog("minecraft: options.txt: %s", report.c_str());
     }
 }
 

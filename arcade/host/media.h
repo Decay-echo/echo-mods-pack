@@ -34,11 +34,16 @@ private:
 };
 
 // ---- YouTube: yt-dlp finds videos (search, playlists, mixes); mpv plays them ----
-struct YtVideo { std::wstring title, info, url; };          // info: channel and length
+struct YtVideo { std::wstring title, info, url, thumb; };   // info: channel and length; thumb: a picture's URL
 struct YtLink { std::wstring name, url; bool playlist; };    // a line of youtube.txt
 std::vector<YtLink> loadYouTubeLinks(const std::wstring& file);
 // These run yt-dlp and block (seconds); ArcadeHost calls them on worker threads.
-bool ytSearch(const std::wstring& ytdlp, const std::wstring& query, std::vector<YtVideo>& out, std::wstring& error);
+bool ytSearch(const std::wstring& ytdlp, const std::wstring& query, std::vector<YtVideo>& out, std::wstring& error, int count = 20);
+// The signed-in home feed (recommendations), with the cookies file an exported cookies.txt gives.
+bool ytFeed(const std::wstring& ytdlp, const std::wstring& cookies, std::vector<YtVideo>& out, std::wstring& error);
+// YouTube needs a JavaScript runtime in yt-dlp now: Deno's path (empty = none, searches may fail).
+void ytSetDeno(const std::wstring& deno);
+std::wstring ytRuntimeArgs();  // the yt-dlp options for it ("" without Deno)
 bool ytPlaylist(const std::wstring& ytdlp, const std::wstring& url, std::wstring& title, std::vector<YtVideo>& out,
                 std::wstring& error);
 std::wstring ytUpdate(const std::wstring& ytdlp);  // yt-dlp -U; returns what it said
@@ -58,6 +63,9 @@ enum class MediaCommand { PlayPause, Next, Previous, Seek };
 // used to pick the browser's media session when several apps have one.
 MediaInfo mediaInfo(const std::wstring& title);
 bool mediaCommand(MediaCommand command, const std::wstring& title, double seconds = 0);  // Seek: to `seconds`
+// The MEDIA page: whatever Windows counts as the current media session (Spotify, a browser, mpv...).
+MediaInfo mediaNowPlaying(std::wstring& app);
+bool mediaControl(MediaCommand command);
 // Presses YouTube's own "Skip" button in the browser window once an ad offers it, through UI
 // Automation (no mouse, no focus change). Returns true if it skipped one. Blocks briefly; call it on
 // a worker thread. Unskippable ads are left alone: there is no button to press.

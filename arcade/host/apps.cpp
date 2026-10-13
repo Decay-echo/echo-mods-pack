@@ -190,7 +190,8 @@ std::vector<AppInfo> listApps(const Config& c) {
     if (c.echoInEcho)
         apps.push_back({AppId::EchoInner, L"ECHO VR", L"Echo in Echo (desktop mode) - FREEZE to play",
                         exists(echoExe(c)) ? L"" : L"echovr.exe not found next to the plugin", rgb(230, 120, 40)});
-    apps.push_back({AppId::YouTube, L"YOUTUBE", exists(c.ytdlp) ? L"Browser YouTube + search" : L"Your browser's YouTube",
+    apps.push_back({AppId::Media, L"MEDIA", L"Play, skip, volume: whatever plays on this PC", L"", rgb(60, 170, 110)});
+    apps.push_back({AppId::YouTube, L"YOUTUBE", exists(c.ytdlp) ? L"Home, search, your links" : L"Your browser's YouTube",
                     L"", rgb(255, 48, 64)});
     games.insert(games.end(), apps.begin(), apps.end());
     return games;
@@ -253,7 +254,7 @@ bool Session::launch(AppId id, const std::wstring& target, double startSeconds,
         setEnv(L"ECHO_ARCADE_WIDTH", std::to_wstring(SCREEN_W));
         setEnv(L"ECHO_ARCADE_HEIGHT", std::to_wstring(SCREEN_H));
     } else if (id == AppId::Minecraft) {
-        minecraft::prepareOptions();
+        minecraft::prepareOptions(minecraftLight_);
         minecraftName_ = playlist.empty() ? L"" : playlist[0];  // the launcher's name rides in the playlist slot
         if (target.rfind(L"shell:", 0) == 0) {  // a Store app: explorer starts it and goes away
             wchar_t sys[MAX_PATH];
@@ -279,6 +280,7 @@ bool Session::launch(AppId id, const std::wstring& target, double startSeconds,
             for (auto& url : playlist) files += (files.empty() ? L"\"" : L" \"") + url + L"\"";
             files += L" --playlist-start=" + std::to_wstring(std::max(0, playlistStart)) +
                      L" \"--script-opts=ytdl_hook-ytdl_path=" + config_.ytdlp + L"\"" +
+                     (exists(config_.deno) ? L" \"--ytdl-raw-options=js-runtimes=deno:" + config_.deno + L",remote-components=ejs:github\"" : L"") +
                      L" \"--ytdl-format=bestvideo[height<=?720]+bestaudio/best\"";
         }
         args = files + L" --input-ipc-server=" + MpvControl::pipeName() +
@@ -458,6 +460,24 @@ void priorityOf(DWORD pid, DWORD cls) {
     HANDLE h = OpenProcess(PROCESS_SET_INFORMATION, FALSE, pid);
     if (h) { SetPriorityClass(h, cls); CloseHandle(h); }
 }
+// The GPU's own scheduling: a process's drawing can be put behind the others'
+// (D3DKMTSetProcessSchedulingPriorityClass; 0 idle, 1 below normal, 2 normal, 3 above, 4 high).
+// Lowering needs no privilege; a VR game on a small GPU dies when a desktop game draws as an equal.
+bool gpuPriorityOf(DWORD pid, int cls) {
+    using Fn = LONG(NTAPI*)(HANDLE, int);
+    static Fn f = [] {
+        HMODULE gdi = LoadLibraryW(L"gdi32.dll");
+        return gdi ? reinterpret_cast<Fn>(GetProcAddress(gdi, "D3DKMTSetProcessSchedulingPriorityClass")) : nullptr;
+    }();
+    if (!f) return false;
+    HANDLE h = OpenProcess(PROCESS_SET_INFORMATION | PROCESS_QUERY_INFORMATION, FALSE, pid);
+    if (!h) h = OpenProcess(PROCESS_SET_INFORMATION | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (!h) return false;
+    LONG status = f(h, cls);
+    CloseHandle(h);
+    if (status < 0) hostLog("gpu: could not set priority class %d on pid %lu (status 0x%08lx)", cls, pid, status);
+    return status >= 0;
+}
 }  // namespace
 
 void Session::background(bool shown, bool playing) {
@@ -479,6 +499,12 @@ void Session::background(bool shown, bool playing) {
         suspendedPid_ = gamePid;
         hostLog("minecraft: suspended (not on the tablet; no CPU until it is)");
     }
+    // The game's GPU work behind Echo's, once its process is known (both when it is played and
+    // when it is only watched: Echo's frames come first either way).
+    if (gamePid && gamePid != gpuLoweredPid_) {
+        gpuLoweredPid_ = gamePid;
+        if (gpuPriorityOf(gamePid, 1)) hostLog("%s: GPU priority below normal (Echo's frames first)", id_ == AppId::Minecraft ? "minecraft" : "echo in echo");
+    }
     int want = playing ? 1 : 0;
     if (want != lastPriority_) {
         lastPriority_ = want;
@@ -497,6 +523,7 @@ void Session::kill() {
     if (gameSuspended_) suspendProcess(suspendedPid_, false);  // ended awake, so nothing stays stuck
     gameSuspended_ = false;
     lastPriority_ = -1;
+    gpuLoweredPid_ = 0;
     for (DWORD pid : owned_) minecraft::killTree(pid);  // the app, a launcher, the game: all of it
     owned_.clear();
     minecraft::writeOwned(owned_);

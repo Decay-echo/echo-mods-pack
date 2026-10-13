@@ -8,6 +8,7 @@
 #include "host.h"
 #include <audiopolicy.h>
 #include <mmdeviceapi.h>
+#include <endpointvolume.h>
 #include <functiondiscoverykeys_devpkey.h>
 #include <roapi.h>
 #include <winstring.h>
@@ -132,6 +133,43 @@ bool routeProcessAudio(DWORD pid, const AudioTarget& target) {
     WindowsDeleteString(device);
     lastAudioError = FAILED(a) ? a : b;
     return SUCCEEDED(a) && SUCCEEDED(b);
+}
+
+namespace {
+ComPtr<IAudioEndpointVolume> endpointVolume() {
+    ComPtr<IMMDeviceEnumerator> enumerator;
+    ComPtr<IMMDevice> device;
+    ComPtr<IAudioEndpointVolume> volume;
+    if (FAILED(CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL, IID_PPV_ARGS(&enumerator))) ||
+        FAILED(enumerator->GetDefaultAudioEndpoint(eRender, eMultimedia, &device)) ||
+        FAILED(device->Activate(__uuidof(IAudioEndpointVolume), CLSCTX_ALL, nullptr, &volume)))
+        return nullptr;
+    return volume;
+}
+}  // namespace
+
+float masterVolume() {
+    auto v = endpointVolume();
+    float level = -1;
+    if (v && SUCCEEDED(v->GetMasterVolumeLevelScalar(&level))) return level;
+    return -1;
+}
+
+bool setMasterVolume(float level) {
+    auto v = endpointVolume();
+    return v && SUCCEEDED(v->SetMasterVolumeLevelScalar(std::clamp(level, 0.f, 1.f), nullptr));
+}
+
+bool masterMuted() {
+    auto v = endpointVolume();
+    BOOL muted = FALSE;
+    return v && SUCCEEDED(v->GetMute(&muted)) && muted;
+}
+
+bool toggleMasterMute() {
+    auto v = endpointVolume();
+    BOOL muted = FALSE;
+    return v && SUCCEEDED(v->GetMute(&muted)) && SUCCEEDED(v->SetMute(!muted, nullptr));
 }
 
 // The process's own device choice forgotten (an empty device): it plays on Windows' default

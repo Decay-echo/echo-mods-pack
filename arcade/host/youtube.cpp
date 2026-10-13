@@ -5,6 +5,7 @@
 #include <winrt/Windows.Data.Json.h>
 #include <cstdio>
 #include <thread>
+#include <algorithm>
 
 using namespace winrt::Windows::Data::Json;
 
@@ -119,6 +120,9 @@ bool parseList(const std::string& json, std::wstring& title, std::vector<YtVideo
             auto e = v.GetObject();
             std::wstring id = text(e, L"id"), name = text(e, L"title");
             if (id.empty() || name == L"[Private video]" || name == L"[Deleted video]") continue;
+            // The video's 320 x 180 picture as a JPEG (the ones yt-dlp lists come back as WebP,
+            // which GDI+ cannot read; every YouTube video has this one, custom thumbnails included).
+            std::wstring thumb = id.empty() ? L"" : L"https://i.ytimg.com/vi/" + id + L"/mqdefault.jpg";
             std::wstring channel = text(e, L"channel");
             if (channel.empty()) channel = text(e, L"uploader");
             double seconds = number(e, L"duration");
@@ -131,7 +135,7 @@ bool parseList(const std::string& json, std::wstring& title, std::vector<YtVideo
             } else if (number(e, L"duration") < 0 && text(e, L"live_status") == L"is_live") {
                 info += L"   -   LIVE";
             }
-            out.push_back({name.empty() ? id : name, info, L"https://www.youtube.com/watch?v=" + id});
+            out.push_back({name.empty() ? id : name, info, L"https://www.youtube.com/watch?v=" + id, thumb});
         }
         return true;
     } catch (...) {
@@ -143,7 +147,7 @@ bool parseList(const std::string& json, std::wstring& title, std::vector<YtVideo
 bool runList(const std::wstring& ytdlp, const std::wstring& args, std::wstring& title, std::vector<YtVideo>& out,
              std::wstring& error) {
     std::string so, se;
-    int code = runYtdlp(ytdlp, L"--ignore-config --no-warnings --flat-playlist -J " + args, so, se, 60000);
+    int code = runYtdlp(ytdlp, L"--ignore-config --no-warnings --flat-playlist -J " + ytRuntimeArgs() + args, so, se, 90000);
     if (code == -1) { error = L"yt-dlp did not start (" + ytdlp + L")"; return false; }
     if (code != 0 || so.empty()) {
         error = lastLine(se);
@@ -186,9 +190,23 @@ std::vector<YtLink> loadYouTubeLinks(const std::wstring& file) {
     return links;
 }
 
-bool ytSearch(const std::wstring& ytdlp, const std::wstring& query, std::vector<YtVideo>& out, std::wstring& error) {
+bool ytSearch(const std::wstring& ytdlp, const std::wstring& query, std::vector<YtVideo>& out, std::wstring& error, int count) {
     std::wstring title;
-    return runList(ytdlp, quoted(L"ytsearch20:" + query), title, out, error);
+    return runList(ytdlp, quoted(L"ytsearch" + std::to_wstring(std::clamp(count, 1, 50)) + L":" + query), title, out, error);
+}
+
+bool ytFeed(const std::wstring& ytdlp, const std::wstring& cookies, std::vector<YtVideo>& out, std::wstring& error) {
+    std::wstring title;
+    return runList(ytdlp, L"--cookies " + quoted(cookies) + L" --playlist-end 40 :ytrec", title, out, error);
+}
+
+namespace {
+std::wstring deno;
+}
+void ytSetDeno(const std::wstring& path) { deno = path; }
+std::wstring ytRuntimeArgs() {
+    if (deno.empty()) return L"";
+    return L"--js-runtimes " + quoted(L"deno:" + deno) + L" --remote-components ejs:github ";
 }
 
 bool ytPlaylist(const std::wstring& ytdlp, const std::wstring& url, std::wstring& title, std::vector<YtVideo>& out,

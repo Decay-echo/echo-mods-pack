@@ -65,6 +65,9 @@ Config loadConfig() {
     c.mpv = get(L"mpv");
     // Older arcade.ini files have no YouTube keys: yt-dlp beside mpv, links beside the ROM folder.
     c.ytdlp = get(L"yt_dlp", (c.mpv.substr(0, c.mpv.find_last_of(L"\\/")) + L"\\yt-dlp.exe").c_str());
+    std::wstring appsDir = c.mpv.substr(0, c.mpv.find_last_of(L"\\/"));
+    appsDir = appsDir.substr(0, appsDir.find_last_of(L"\\/"));
+    c.deno = get(L"deno", (appsDir + L"\\deno\\deno.exe").c_str());
     c.youtubeLinks = get(L"youtube_links", (c.roms.substr(0, c.roms.find_last_of(L"\\/")) + L"\\youtube.txt").c_str());
     std::wstring movies = get(L"movies"), part;
     for (size_t i = 0; i <= movies.size(); i++) {

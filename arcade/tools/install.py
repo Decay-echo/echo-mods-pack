@@ -277,6 +277,8 @@ roms={apps / 'roms'}
 mpv={apps / 'mpv/mpv.exe'}
 ; YOUTUBE tile: yt-dlp finds the videos, mpv plays them; your saved links, one "Name | link" per line
 yt_dlp={apps / 'mpv/yt-dlp.exe'}
+; the JavaScript runtime yt-dlp needs for YouTube (tools/setup_apps.py downloads it)
+deno={apps / 'deno/deno.exe'}
 youtube_links={apps / 'youtube.txt'}
 ; MINECRAFT tile (Java Edition): your launchers are found by themselves (the Minecraft Launcher,
 ; CurseForge, Modrinth App, Prism Launcher); a path here overrides the search
@@ -321,6 +323,7 @@ look_speed=3
     target.mkdir(parents=True, exist_ok=True)
     (target / 'arcade.ini').write_text(ini, encoding='utf-8')
     write_youtube_links()
+    write_youtube_home()
 
 
 YOUTUBE_LINKS = """# Echo Arcade - YOUTUBE tile: your saved links, one per line:  Name | link
@@ -328,6 +331,17 @@ YOUTUBE_LINKS = """# Echo Arcade - YOUTUBE tile: your saved links, one per line:
 # Edit this file any time; the tile reads it each time you open it.
 My music mix | https://www.youtube.com/watch?v=uvXbJfhd39E&list=RD6u9FsHX2b-8&index=11
 """
+
+
+def write_youtube_home():
+    """The topics the YOUTUBE tile's HOME page is built from (without a cookies file)."""
+    p = ROOT / 'apps' / 'youtube_home.txt'
+    if p.exists():
+        return
+    p.write_text('# YOUTUBE > HOME: one topic a line; each becomes a row of videos. Lines starting with # are ignored.\n'
+                 '# For your own signed-in feed instead, export your YouTube cookies (a browser extension such as\n'
+                 '# "Get cookies.txt LOCALLY") to apps\\youtube_cookies.txt.\n'
+                 'music\ngaming\necho vr\n', encoding='utf-8')
 
 
 def write_youtube_links():
