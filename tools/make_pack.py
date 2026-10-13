@@ -33,6 +33,7 @@ FROM_DISC = {
     'hudplus/README.md': 'hudplus/README.md',
     'hudplus/hudplus.cpp': 'hudplus/src/hudplus.cpp',
     'hudplus/hudplus_core.h': 'hudplus/src/hudplus_core.h',
+    'hudplus/discord_ipc.h': 'hudplus/src/discord_ipc.h',
     'hudplus/game_memory.h': 'hudplus/src/game_memory.h',
     'hudplus/passes.h': 'hudplus/src/passes.h',
     'hudplus/build/EchoHudPlus.dll': 'hudplus/build/EchoHudPlus.dll',

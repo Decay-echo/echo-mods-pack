@@ -31,6 +31,7 @@
 #include "hudplus_core.h"
 #include "game_memory.h"
 #include "passes.h"
+#include "discord_ipc.h"
 #include "../discbutton/minhook/include/MinHook.h"
 #include <cstdarg>
 #include <cstdio>
@@ -416,6 +417,7 @@ void hookGame() {
 // thread, is one pre-recorded command list and a commit. Nothing slow runs inside Echo's
 // frame; the log says how long our part took, once a minute.
 ID3D12CommandQueue* gameQueue = nullptr;
+const arcade::DiscordShared* discordShared = nullptr;  // the arcade host's Discord block (read only)
 enum class Mode { Waiting, Ready, Off } mode = Mode::Waiting;
 size_t headerSize = 0;
 bool triedOtherLayout = false;
@@ -443,6 +445,9 @@ struct DrawJob {
     bool passPlus = false;
     Color passColor{1, 1, 1};
     float passAlpha = 0, passScale = 1;
+    uint32_t discordKey = 0;   // the arcade host's Discord block: changes when it does
+    bool discordVoice = false, discordBadge = false;
+    float badgeAlpha = 0;
 };
 
 bool sameText(const DrawJob& a, const DrawJob& b) {  // sizes and colour matter only with text to show
@@ -451,6 +456,7 @@ bool sameText(const DrawJob& a, const DrawJob& b) {  // sizes and colour matter 
 }
 bool differs(const DrawJob& a, const DrawJob& b) {
     if (a.generation != b.generation || a.flashKey != b.flashKey || a.passKey != b.passKey || !sameText(a, b)) return true;
+    if (a.discordKey != b.discordKey || a.discordVoice != b.discordVoice || a.discordBadge != b.discordBadge) return true;
     for (int i = 0; i < 2; i++)
         if (a.gaugeKey[i] != b.gaugeKey[i] || a.thrustKey[i] != b.thrustKey[i]) return true;
     for (int k = 0; k < Settings::kRings; k++)
@@ -487,6 +493,7 @@ struct Painter {
     std::atomic<unsigned> pictures{0};
     std::atomic<long long> busyUs{0};
     Canvas canvas;
+    arcade::DiscordShared discord{};  // the host's block as last copied (paint)
     std::vector<uint8_t> bytes;
     DrawJob last;
     bool first = true;
@@ -536,6 +543,32 @@ bool paint(const DrawJob& job) {
     }
     if (all || job.passKey != last.passKey) {
         drawPassCounter(cv, kPassRect, job.passNumber, job.passPlus, job.passColor, job.passAlpha, &digitFont);
+        any = true;
+    }
+    if (all || job.discordKey != last.discordKey || job.discordVoice != last.discordVoice || job.discordBadge != last.discordBadge) {
+        // a consistent copy of the host's block (its serial is odd while it writes)
+        bool got = false;
+        if (discordShared) {
+            for (int tries = 0; tries < 8 && !got; tries++) {
+                LONG s0 = discordShared->serial;
+                if (s0 & 1) { Sleep(1); continue; }
+                MemoryBarrier();
+                memcpy(&painter.discord, discordShared, sizeof painter.discord);
+                MemoryBarrier();
+                got = discordShared->serial == s0;
+            }
+        }
+        const auto& d = painter.discord;
+        if (job.discordVoice && got) {
+            DiscordMemberView views[arcade::DISCORD_MAX_MEMBERS];
+            int n = std::min<int>(int(d.memberCount), arcade::DISCORD_MAX_MEMBERS);
+            for (int i = 0; i < n; i++) views[i] = {d.members[i].picture.rgba, d.members[i].hasPicture != 0, d.members[i].speaking != 0, d.members[i].self != 0, d.members[i].mute != 0 || d.members[i].deaf != 0};
+            drawVoiceRow(cv, kVoiceRect, views, n, job.hud);
+        } else {
+            cv.clear(kVoiceRect);
+        }
+        if (job.discordBadge && got) drawMessageBadge(cv, kBadgeRect, d.lastPicture.rgba, d.lastHasPicture != 0, int(d.unread), job.badgeAlpha, &digitFont);
+        else cv.clear(kBadgeRect);
         any = true;
     }
     painter.last = job;
@@ -755,6 +788,41 @@ DrawJob buildJob(const Snapshot& s, double t) {
         job.passAlpha = pv.alpha;
         job.passScale = pv.scale;
     }
+
+    // Discord, from the arcade host's block (opened when the host has made it)
+    if (settings.discord) {
+        static double lastOpen = -10;
+        if (!discordShared && t - lastOpen > 5) {
+            lastOpen = t;
+            HANDLE map = OpenFileMappingW(FILE_MAP_READ, FALSE, arcade::DISCORD_SHARED_NAME);
+            if (map) {
+                discordShared = static_cast<const arcade::DiscordShared*>(MapViewOfFile(map, FILE_MAP_READ, 0, 0, sizeof(arcade::DiscordShared)));
+                CloseHandle(map);
+                if (discordShared && (discordShared->magic != arcade::DISCORD_MAGIC || discordShared->version != arcade::DISCORD_VERSION)) {
+                    logf("discord: the arcade's block has another version (%u)", discordShared->version);
+                    UnmapViewOfFile(discordShared);
+                    discordShared = nullptr;
+                } else if (discordShared) {
+                    logf("discord: the arcade host's block is open");
+                }
+            }
+        }
+        if (discordShared) {
+            uint64_t nowTick = GetTickCount64();
+            bool alive = nowTick - uint64_t(discordShared->heartbeat) < 5000;
+            job.discordVoice = alive && discordShared->connected && discordShared->inVoice && discordShared->memberCount > 0;
+            int unread = int(discordShared->unread);
+            uint64_t since = nowTick - uint64_t(discordShared->lastMessageAt);
+            float window = settings.badgeSeconds * 1000;
+            if (alive && unread > 0 && discordShared->lastMessageAt && since < uint64_t(window)) {
+                job.discordBadge = true;
+                float left = (window - float(since)) / 1000.f;  // fades over the last half second
+                job.badgeAlpha = left > 0.5f ? 1.f : clamp01(left / 0.5f);
+            }
+            uint32_t key = uint32_t(discordShared->serial) * 31u + uint32_t(job.badgeAlpha * 20) * 7u + unsigned(job.discordVoice) * 3u + unsigned(job.discordBadge);
+            job.discordKey = key;
+        }
+    }
     return job;
 }
 
@@ -790,7 +858,9 @@ unsigned layout(const DrawJob& job, const QuadLayer** out) {
     for (int k = 0; k < Settings::kRings; k++)
         if (job.glowKey[k] != -2) add(kGlowRect[k], glowPlacement(settings, k));
     if (job.current[0]) add(kTextRect, trackerPlacement(settings));
-    if (job.passKey >= 0) add(kPassRect, passPlacement(settings, job.passScale));
+    if (job.passKey >= 0 && !job.discordBadge) add(kPassRect, passPlacement(settings, job.passScale));  // the Discord badge has the spot for its seconds
+    if (job.discordVoice) add(kVoiceRect, voicePlacement(settings));
+    if (job.discordBadge) add(kBadgeRect, badgePlacement(settings));
     return n;
 }
 
@@ -990,6 +1060,11 @@ void readSettings(const std::wstring& ini) {
     s.passY = f(L"passes", L"y_m", s.passY, -1.f, 1.f);
     s.passMaxSeconds = f(L"passes", L"max_seconds", s.passMaxSeconds, 0.5f, 60.f);
     s.passMaxBounces = int(f(L"passes", L"max_bounces", float(s.passMaxBounces), 0.f, 9.f));
+    s.discord = b(L"discord", L"enabled", s.discord);
+    s.discordPx = f(L"discord", L"size_px", s.discordPx, 8.f, 200.f);
+    s.discordUpPx = f(L"discord", L"gap_px", s.discordUpPx, -200.f, 200.f);
+    s.badgeScale = f(L"discord", L"badge_scale", s.badgeScale, 0.5f, 4.f);
+    s.badgeSeconds = f(L"discord", L"badge_seconds", s.badgeSeconds, 1.f, 10.f);
 }
 
 void loadDigits(const std::wstring& path) {

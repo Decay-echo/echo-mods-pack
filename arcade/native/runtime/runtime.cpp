@@ -91,7 +91,7 @@ constexpr U MARKERS[KINDS] = {ARCADE_ROOT_MARKER, ARCADE_NAV_MARKER, ARCADE_PAGE
 
 struct View { void* p = nullptr; bool saved = false; float opacity = 0; std::array<bool, 3> visible{}; };
 enum class Page { Stock, Arcade };
-enum class Mode { Arcade = 0, Settings = 1 };  // both tabs show our page; the host draws either
+enum class Mode { Arcade = 0, Settings = 1, Discord = 2 };  // all three tabs show our page; the host draws each
 struct Context {
     Page page = Page::Stock;
     Mode mode = Mode::Arcade;
@@ -108,7 +108,7 @@ std::set<std::array<U, 3>> held;                            // (gamespace, actor
 
 bool isContent(U n) { return std::find(std::begin(CONTENT), std::end(CONTENT), n) != std::end(CONTENT); }
 bool isStockTab(U n) { return n >= STOCK_TAB_FIRST && n <= STOCK_TAB_LAST; }
-bool isOurTab(U n) { return n == ARCADE_TAB || n == SETTINGS_TAB; }
+bool isOurTab(U n) { return n == ARCADE_TAB || n == SETTINGS_TAB || n == DISCORD_TAB; }
 int cellOf(U n) { auto it = cellIndex.find(n); return it == cellIndex.end() ? -1 : int(it->second); }
 
 void remember(void* p, unsigned depth = 0) {
@@ -200,12 +200,13 @@ void render(Context& c) {
     }
     // Tab highlights: ours while our page is up, otherwise the stock ones (which the
     // game's own scripts keep pointing at the right stock tab).
-    int nav = !active ? 0 : c.mode == Mode::Settings ? 2 : 1;
+    int nav = !active ? 0 : c.mode == Mode::Settings ? 2 : c.mode == Mode::Discord ? 3 : 1;
     if (c.views[1].p && c.navState != nav) {
         show(c.views[1].p, ARCADE_NAV_SELECTED, nav == 1);
         show(c.views[1].p, SETTINGS_NAV_SELECTED, nav == 2);
+        show(c.views[1].p, DISCORD_NAV_SELECTED, nav == 3);
         for (auto i : ARCADE_NAV_STOCK_SELECTED) show(c.views[1].p, i, nav == 0);
-        if (root.p && nav) text(root.p, ARCADE_ROOT_TITLE, nav == 2 ? "SETTINGS" : "ARCADE");
+        if (root.p && nav) text(root.p, ARCADE_ROOT_TITLE, nav == 2 ? "SETTINGS" : nav == 3 ? "DISCORD" : "ARCADE");
         c.navState = nav;
     }
     if (active && c.views[2].p) {
@@ -371,8 +372,8 @@ void onEvent(void* gs, U event, U actor, U component) {
         if (c.page == Page::Arcade) { releaseAllTouches(gs); held.insert(key); logf("left ARCADE page"); }
         c.page = Page::Stock;
     } else if (isOurTab(component)) {
-        Mode mode = component == SETTINGS_TAB ? Mode::Settings : Mode::Arcade;
-        if (c.page != Page::Arcade || c.mode != mode) logf("%s page selected", mode == Mode::Settings ? "SETTINGS" : "ARCADE");
+        Mode mode = component == SETTINGS_TAB ? Mode::Settings : component == DISCORD_TAB ? Mode::Discord : Mode::Arcade;
+        if (c.page != Page::Arcade || c.mode != mode) logf("%s page selected", mode == Mode::Settings ? "SETTINGS" : mode == Mode::Discord ? "DISCORD" : "ARCADE");
         if (c.page == Page::Arcade && c.mode != mode) { releaseAllTouches(gs); held.insert(key); }
         c.page = Page::Arcade;
         c.mode = mode;

@@ -75,7 +75,7 @@ struct Shared {
     volatile LONG gamePid;
     volatile LONG pageVisible;      // ARCADE page is the active tablet page
     volatile LONG readingFrame;     // buffer the game is copying right now, NO_FRAME if none
-    volatile LONG pageMode;         // 0 = ARCADE tab, 1 = SETTINGS tab (same page, host draws it)
+    volatile LONG pageMode;         // 0 = ARCADE tab, 1 = SETTINGS tab, 2 = DISCORD tab (same page, host draws it)
     volatile LONG64 gameHeartbeat;
     volatile LONG touchWrite;       // total events ever written
     volatile LONG dockDone;         // last dockSerial the game handled

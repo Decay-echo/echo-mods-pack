@@ -83,6 +83,13 @@ struct Settings {
     float passPx = 26.f;          // box height, canvas px (three times as wide)
     float passY = 0.075f;         // metres above eye level, at the HUD's distance
     float passMaxSeconds = 5.f;   // a pass must reach the teammate within this (loose time)
+    // Discord (from the arcade host's block): the voice call's people above the speeds, the
+    // newest message's sender with +N at the top
+    bool discord = true;
+    float discordPx = 36.f;       // the voice row's height, readout px (avatars a little smaller)
+    float discordUpPx = 6.f;      // gap between the row and the speeds box, px
+    float badgeScale = 1.5f;      // the message badge: the pass counter's spot, this much bigger
+    float badgeSeconds = 3.f;     // how long it stays after a message (the pass counter waits)
     int passMaxBounces = 1;       // and bounce at most this often on the way (1: a bounce pass counts)
 };
 
@@ -275,6 +282,8 @@ constexpr Rect kFlashRect = {4, 132, 120, 120};
 constexpr Rect kThrustRect[2] = {{136, 128, 128, 128}, {264, 128, 128, 128}};
 constexpr Rect kGlowRect[5] = {{260, 2, 60, 60}, {326, 2, 60, 60}, {392, 2, 60, 60}, {260, 66, 60, 60}, {326, 66, 60, 60}};
 constexpr Rect kPassRect = {0, 258, 378, 126};  // the pass counter (3:1)
+constexpr Rect kVoiceRect = {384, 258, 512, 64};  // Discord: 8 avatars of 64 (a 56 px disc and its ring)
+constexpr Rect kBadgeRect = {900, 258, 124, 64};  // Discord: the newest message's sender and +N
 
 struct Color { float r, g, b; };  // linear 0..1
 constexpr Color kReady = {0.1f, 1.f, 0.25f}, kCharging = {1.f, 0.08f, 0.05f}, kGood = {1.f, 0.8f, 0.08f}, kTrack = {1.f, 1.f, 1.f};
@@ -823,6 +832,63 @@ inline void drawSpeeds(Canvas& cv, const Rect& r, const char* current, const cha
 
 // The pass counter: "+1" (number 1, plus) or a number, centred, in Echo's digits and the
 // team colour; the plus sign is drawn (Echo's font file has only digits).
+// ---- Discord: round avatars with a ring (green while talking), from 48 x 48 RGBA bytes
+inline float srgbToLinear(float c) { return c <= 0.04045f ? c / 12.92f : std::pow((c + 0.055f) / 1.055f, 2.4f); }
+inline void drawAvatarDisc(Canvas& cv, int cx, int cy, int radius, const uint8_t* rgba, int n, bool has, Color ring, int ringPx, float alpha, Color fallback) {
+    static const std::vector<float> lut = [] {
+        std::vector<float> t(256);
+        for (int i = 0; i < 256; i++) t[i] = srgbToLinear(i / 255.f);
+        return t;
+    }();
+    int reach = radius + ringPx + 1;
+    for (int y = cy - reach; y <= cy + reach; y++) {
+        if (y < 0 || y >= cv.h) continue;
+        for (int x = cx - reach; x <= cx + reach; x++) {
+            if (x < 0 || x >= cv.w) continue;
+            float dx = x + .5f - cx, dy = y + .5f - cy, d = std::sqrt(dx * dx + dy * dy);
+            float inner = clamp01(radius - d + .5f);
+            if (inner > 0) {
+                Color c = fallback;
+                if (has) {
+                    int sx = std::clamp(int((dx + radius) / (2.f * radius) * n), 0, n - 1), sy = std::clamp(int((dy + radius) / (2.f * radius) * n), 0, n - 1);
+                    const uint8_t* p = rgba + (size_t(sy) * n + sx) * 4;
+                    c = {lut[p[0]], lut[p[1]], lut[p[2]]};
+                }
+                cv.over(x, y, c, alpha * inner);
+            }
+            if (ringPx > 0) {
+                float band = clamp01(radius + ringPx - d + .5f) - clamp01(radius - d + .5f);
+                if (band > 0) cv.over(x, y, ring, alpha * band);
+            }
+        }
+    }
+}
+struct DiscordMemberView { const uint8_t* rgba; bool has, speaking, self, quiet; };
+inline void drawVoiceRow(Canvas& cv, const Rect& r, const DiscordMemberView* members, int count, Color hud) {
+    cv.clear(r);
+    int n = count > 8 ? 8 : count;
+    if (n <= 0) return;
+    const int cell = 64, radius = 26;
+    int x0 = r.x + (r.w - n * cell) / 2;
+    const Color green{0.08f, 0.72f, 0.3f}, idle{0.22f, 0.24f, 0.30f}, fallback{0.28f, 0.30f, 0.45f};
+    for (int i = 0; i < n; i++) {
+        const auto& m = members[i];
+        int cx = x0 + i * cell + cell / 2, cy = r.y + r.h / 2;
+        drawAvatarDisc(cv, cx, cy, radius, m.rgba, 48, m.has, m.speaking ? green : m.self ? hud : idle, m.speaking ? 4 : 2, m.quiet ? 0.5f : 1.f, fallback);
+    }
+}
+inline void drawMessageBadge(Canvas& cv, const Rect& r, const uint8_t* rgba, bool has, int unread, float alpha, const DigitFont* font) {
+    cv.clear(r);
+    if (unread <= 0 || alpha <= 0) return;
+    const int radius = 26;
+    drawAvatarDisc(cv, r.x + radius + 4, r.y + r.h / 2, radius, rgba, 48, has, Color{0.35f, 0.4f, 0.95f}, 3, alpha, Color{0.28f, 0.30f, 0.45f});
+    char text[12];
+    snprintf(text, sizeof text, "+%d", unread > 99 ? 99 : unread);
+    const float cap = r.h * 0.5f, size = fontOk(font) ? cap / fontCap(*font, 1.f) : cap / 0.62f;
+    Rect box{r.x + 2 * radius + 12, r.y + int(r.h * 0.22f), r.w - 2 * radius - 14, int(r.h * 0.56f)};
+    drawText(cv, box, text, Color{1, 1, 1}, alpha, font, size);
+}
+
 inline void drawPassCounter(Canvas& cv, const Rect& r, int number, bool plus, Color c, float alpha, const DigitFont* font) {
     cv.clear(r);
     if (number <= 0 || alpha <= 0) return;
@@ -956,6 +1022,15 @@ inline Placement flashPlacement() { return {0, 0, 1.f, 3.4f, 3.4f}; }  // ~120 d
 inline Placement passPlacement(const Settings& s, float scale) {
     float h = s.passPx / s.pxPerMetre * scale;
     return {0, s.passY, s.hudDistance, h * kPassRect.w / kPassRect.h, h};
+}
+// Discord: the voice row just above the speeds box; the message badge above the pass counter.
+inline Placement voicePlacement(const Settings& s) {
+    float down = s.trackerDown - s.trackerPx * 0.5f - s.discordUpPx - s.discordPx * 0.5f;
+    return placeCanvasPx(s, 0, down, s.discordPx * kVoiceRect.w / kVoiceRect.h, s.discordPx);
+}
+inline Placement badgePlacement(const Settings& s) {  // the pass counter's spot, bigger; the counter waits meanwhile
+    float h = s.passPx / s.pxPerMetre * s.badgeScale;
+    return {0, s.passY, s.hudDistance, h * kBadgeRect.w / kBadgeRect.h, h};
 }
 
 // ---- D3D12 uploads --------------------------------------------------------------------

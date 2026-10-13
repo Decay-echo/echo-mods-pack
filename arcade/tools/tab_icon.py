@@ -93,10 +93,31 @@ def _gear(size, stroke):
     return layer.resize(size, Image.LANCZOS)
 
 
-GLYPHS = {'arcade': _gamepad, 'settings': _gear}
+def _discord(size, stroke):
+    """White Discord-style glyph (the rounded controller face with two eyes), 4x supersampled."""
+    s = 4
+    w, h = size
+    layer = Image.new('RGBA', (w * s, h * s), (0, 0, 0, 0))
+    d = ImageDraw.Draw(layer)
+    white = (255, 255, 255, 255)
+    X = lambda f: f * w * s
+    Y = lambda f: f * h * s
+    # the face: a wide rounded body with the two "ears" sloping down at the sides
+    d.rounded_rectangle((X(.23), Y(.33), X(.77), Y(.63)), radius=Y(.13), fill=white)
+    d.polygon([(X(.23), Y(.44)), (X(.19), Y(.66)), (X(.33), Y(.72)), (X(.40), Y(.60))], fill=white)
+    d.polygon([(X(.77), Y(.44)), (X(.81), Y(.66)), (X(.67), Y(.72)), (X(.60), Y(.60))], fill=white)
+    d.rounded_rectangle((X(.33), Y(.52), X(.67), Y(.66)), radius=Y(.07), fill=white)
+    # the eyes
+    for cx in (.41, .59):
+        r = X(.055)
+        d.ellipse((X(cx) - r, Y(.47) - r * 1.15, X(cx) + r, Y(.47) + r * 1.15), fill=(0, 0, 0, 0))
+    return layer.resize(size, Image.LANCZOS)
 
 
-def tab_icons(atlas, idle_uv, selected_uv, names=('arcade', 'settings')):
+GLYPHS = {'arcade': _gamepad, 'settings': _gear, 'discord': _discord}
+
+
+def tab_icons(atlas, idle_uv, selected_uv, names=('arcade', 'settings', 'discord')):
     """-> (w, h, BGRA bytes, {name: (idle uv, selected uv)}) for one icon texture.
 
     Frames sit in 128x128 cells: one row per icon, idle left and selected right."""

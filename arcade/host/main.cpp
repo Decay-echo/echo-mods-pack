@@ -4,6 +4,8 @@
 #include "apps.h"
 #include "thumbs.h"
 #include "share.h"
+#include "discord.h"
+#include "../native/shared/discord_ipc.h"
 #include "minecraft.h"
 #include "mod_settings.h"
 #include "touchpad.h"
@@ -80,6 +82,12 @@ std::wstring clock(double s) {
 enum class Mode { Launcher, Browse, PlexLink, Running, Menu, Keyboard, Screen, Media, Watch, Split };
 const Rect WATCH_BACK{12, 6, 236, 52}, WATCH_LEAVE{248, 6, 420, 52};  // WATCH A FRIEND: back to my own tablet (still connected) / disconnect
 const Rect SPLIT_STOP{12, 6, 180, 52}, SPLIT_MINE{192, 6, 416, 52};   // SPLIT SCREEN: end it / my own tablet (it goes on)
+// The DISCORD page: the bottom row of buttons, the lists, the sign-in button, the call overlay.
+const Rect DC_MUTE{20, 486, 250, 552}, DC_DEAF{262, 486, 492, 552}, DC_LEAVE{504, 486, 734, 552}, DC_MSGS{746, 486, 1004, 552};
+const Rect DC_CONNECT{312, 300, 712, 380}, DC_SIGNOUT{880, 14, 1010, 62};
+const Rect DC_UP{916, 84, 1012, 296}, DC_DOWN{916, 304, 1012, 520};
+const Rect CALL_ANSWER{232, 340, 482, 440}, CALL_IGNORE{542, 340, 792, 440};
+constexpr int DC_ROWS = 6;
 // The MEDIA page: now playing, then play / skip, then volume.
 const Rect MEDIA_PREV{40, 230, 320, 330}, MEDIA_PLAY{372, 230, 652, 330}, MEDIA_NEXT{704, 230, 984, 330};
 const Rect MEDIA_VOLDOWN{40, 360, 320, 460}, MEDIA_MUTE{372, 360, 652, 460}, MEDIA_VOLUP{704, 360, 984, 460};
@@ -102,6 +110,7 @@ public:
     Host(arcade::Shared* shared, bool standalone)
         : shared_(shared), standalone_(standalone), config_(loadConfig()), session_(config_), lightGun_(config_) {
         readPos_ = shared_->touchWrite;
+        openDiscordShared();
         ytSetDeno(exists(config_.deno) ? config_.deno : L"");
         if (exists(config_.ytdlp) && !exists(config_.deno)) hostLog("youtube: no Deno (%ls): YouTube searches may fail; rerun the installer", config_.deno.c_str());
         apps_ = listApps(config_);
@@ -146,6 +155,7 @@ public:
             pollMedia(now);
             pollAds(now);
             pollWatch();
+            pollDiscord(now);
             share_.audioSource(shareAudioPid());
             pollDock();
             autoDock(now);
@@ -1302,6 +1312,17 @@ private:
 
     void loadSettings() {
         std::wstring t = tweaksPath();
+        {
+            std::wstring id = iniText(t, L"discord", L"client_id", L""), secret = iniText(t, L"discord", L"client_secret", L"");
+            if (id != dClientId_ || secret != dClientSecret_) {
+                dClientId_ = id;
+                dClientSecret_ = secret;
+                discord_.stop();
+                discord_.configure(id, secret, localAppData() + L"\\EchoArcade\\discord_login.json");
+                discord_.start();
+                hostLog("discord: %s", id.empty() ? "no app id in echo_tweaks.ini [discord]" : "app id set; talking to Discord");
+            }
+        }
         shared_->tabletScale = LONG(std::clamp(iniFloat(t, L"tablet", L"scale", 1.f), .5f, 4.f) * 1000);
         autoDock_ = GetPrivateProfileIntW(L"dock", L"auto", 1, t.c_str()) != 0;  // on unless turned off
         posterHq_ = _wcsicmp(iniText(t, L"poster", L"quality", L"normal").c_str(), L"high") == 0;
@@ -1398,6 +1419,7 @@ private:
             p.options.push_back(toggle(L"Speeds", L"Your speed, and your last run's top speed under it", hud, L"speed", L"enabled", true));
             p.options.push_back(slider(L"Speed size", L"How big your current speed is", hud, L"speed", L"current_font_px", 12, 36, 1, 20, L"%.0f"));
             p.options.push_back(toggle(L"Mute + network icons", L"Either side of the speeds", hud, L"thrusters", L"icons", true));
+            p.options.push_back(toggle(L"Discord", L"Your call's people above the speed (green ring on whoever talks); a new message's sender with +N at the top for 3 s", hud, L"discord", L"enabled", true));
             Option passes{L"Pass counter", L"Top of your view: +1 a pass, the count from 6, big on a goal", Kind::Choice};
             passes.choices = {L"OFF", L"MY TEAM", L"BOTH"};
             passes.get = [hud] {
@@ -1682,6 +1704,7 @@ private:
     static Rect plusRect(int i) { return {940, rowY(i) + 5, 1004, rowY(i) + 55}; }
     static Rect trackRect(int i) { return {664, rowY(i) + 22, 914, rowY(i) + 38}; }
     bool settingsMode() const { return shared_->pageMode == 1; }
+    bool discordMode() const { return shared_->pageMode == 2; }
 
     void change(Option& o, float v) {
         if (o.kind == Kind::Slider) v = std::clamp(std::round(v / o.step) * o.step, o.min, o.max);
@@ -1805,6 +1828,8 @@ private:
             lastTouchAt_ = touchNow;
         }
         if (!loading_.empty() && !settingsMode()) return;
+        if (dstate_.call.at && callTouch(t)) return;
+        if (discordMode()) { discordTouch(t); return; }
         if (settingsMode()) { settingsTouch(t); return; }
         switch (mode_) {
             case Mode::Launcher: launcherTouch(t); break;
@@ -2431,6 +2456,245 @@ private:
         if (session_.alive() && session_.capture().latest(upPixels_, upW_, upH_, upSerial_)) watch_.offerUp(upPixels_.data(), upW_, upH_, upW_ * 4);
     }
 
+    // ---- DISCORD (discord.h): the page on the DISCORD tab, an incoming call over any page,
+    // and the block the HUD reads.
+    void pollDiscord(uint64_t now) {
+        uint64_t serial = discord_.serial();
+        if (serial != dstateSerial_) {
+            dstate_ = discord_.state();
+            dstateSerial_ = serial;
+            if (dstate_.call.at && now - dstate_.call.at > 45000) discord_.dismissCall();  // nobody answered
+            writeDiscordShared(now);
+        } else if (dstate_.call.at && now - dstate_.call.at > 45000) {
+            discord_.dismissCall();
+        }
+        if (dshared_ && now - dsharedBeat_ > 1000) { dshared_->heartbeat = LONG64(now); dsharedBeat_ = now; }
+    }
+    void openDiscordShared() {
+        dmap_ = CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0, sizeof(arcade::DiscordShared), arcade::DISCORD_SHARED_NAME);
+        if (!dmap_) return;
+        dshared_ = static_cast<arcade::DiscordShared*>(MapViewOfFile(dmap_, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(arcade::DiscordShared)));
+        if (!dshared_) return;
+        dshared_->magic = arcade::DISCORD_MAGIC;
+        dshared_->version = arcade::DISCORD_VERSION;
+    }
+    static void avatarTo48(const SharePicture* pic, uint8_t* out, LONG& has) {
+        has = pic && pic->w ? 1 : 0;
+        if (!has) { memset(out, 0, size_t(arcade::DISCORD_AVATAR) * arcade::DISCORD_AVATAR * 4); return; }
+        const int N = arcade::DISCORD_AVATAR;
+        for (int y = 0; y < N; y++)
+            for (int x = 0; x < N; x++) {
+                int sx = x * pic->w / N, sy = y * pic->h / N;
+                const uint8_t* p = pic->bgra.data() + (size_t(sy) * pic->w + sx) * 4;
+                uint8_t* o = out + (size_t(y) * N + x) * 4;
+                o[0] = p[2]; o[1] = p[1]; o[2] = p[0]; o[3] = 255;
+            }
+    }
+    static void copyName(wchar_t* out, const std::wstring& s) {
+        size_t n = std::min<size_t>(31, s.size());
+        memcpy(out, s.data(), n * sizeof(wchar_t));
+        out[n] = 0;
+    }
+    void writeDiscordShared(uint64_t now) {
+        if (!dshared_) return;
+        auto& d = *dshared_;
+        InterlockedIncrement(&d.serial);  // odd: being written
+        MemoryBarrier();
+        d.connected = dstate_.authed ? 1 : 0;
+        d.inVoice = dstate_.channelId.empty() ? 0 : 1;
+        int n = 0;
+        for (auto& m : dstate_.members) {
+            if (n >= arcade::DISCORD_MAX_MEMBERS) break;
+            auto& o = d.members[n++];
+            copyName(o.name, m.user.name);
+            o.speaking = m.speaking; o.self = m.self; o.mute = m.mute; o.deaf = m.deaf;
+            avatarTo48(discord_.avatar(m.user, 64).get(), o.picture.rgba, o.hasPicture);
+        }
+        d.memberCount = n;
+        d.unread = dstate_.unread;
+        d.lastMessageAt = dstate_.notes.empty() ? 0 : LONG64(dstate_.notes.front().at);
+        if (!dstate_.notes.empty()) {
+            copyName(d.lastFrom, dstate_.notes.front().from.name);
+            avatarTo48(discord_.avatar(dstate_.notes.front().from, 64).get(), d.lastPicture.rgba, d.lastHasPicture);
+        }
+        d.ringing = dstate_.call.at ? 1 : 0;
+        if (dstate_.call.at) {
+            copyName(d.caller, dstate_.call.from.name);
+            avatarTo48(discord_.avatar(dstate_.call.from, 64).get(), d.callerPicture.rgba, d.callerHasPicture);
+        }
+        d.heartbeat = LONG64(now);
+        MemoryBarrier();
+        InterlockedIncrement(&d.serial);  // even: done
+        dsharedBeat_ = now;
+    }
+    void drawAvatar(const DiscordUser& u, Rect box, uint32_t ring, int ringWidth) {
+        auto pic = discord_.avatar(u, 128);
+        Rect inner{box.x0 + ringWidth, box.y0 + ringWidth, box.x1 - ringWidth, box.y1 - ringWidth};
+        if (pic && pic->w) canvas_.blit(pic->bgra.data(), pic->w, pic->h, pic->w * 4, inner);
+        else {
+            canvas_.fill(inner, rgb(60, 64, 90));
+            canvas_.text(inner, u.name.empty() ? L"?" : u.name.substr(0, 1), inner.h() / 2, rgb(230, 230, 240));
+        }
+        if (ringWidth > 0) canvas_.frame(box, ring, ringWidth);
+    }
+    Rect dRowRect(int i) const { return {12, 84 + i * 72, 904, 84 + i * 72 + 66}; }
+    void drawDiscord() {
+        canvas_.clear(rgb(18, 19, 26));
+        const DiscordState& s = dstate_;
+        if (!discord_.configured()) {
+            header(L"DISCORD", false);
+            const wchar_t* lines[] = {
+                L"One-time setup on the PC (Discord only talks to an app you made yourself):",
+                L"1.  discord.com/developers/applications  >  New Application (any name, e.g. Echo Arcade)",
+                L"2.  OAuth2  >  Redirects  >  add   http://localhost   and save",
+                L"3.  Copy the Application ID and the Client Secret (OAuth2 page) into",
+                L"     plugins\\EchoArcade\\echo_tweaks.ini  under  [discord]  as  client_id=  and  client_secret=",
+                L"The tablet notices the file within a second. Discord must be running on this PC."};
+            int y = 110;
+            for (auto l : lines) { canvas_.text({40, y, SCREEN_W - 40, y + 40}, l, 21, rgb(210, 215, 230), false, 0); y += 54; }
+            return;
+        }
+        if (!s.authed) {
+            header(L"DISCORD", false);
+            canvas_.text({40, 110, SCREEN_W - 40, 150}, s.status.empty() ? L"Connecting to Discord..." : s.status, 24, rgb(220, 225, 235), false, 0);
+            if (s.pipe && !s.busy) {
+                button(DC_CONNECT, L"CONNECT", pressed_ == 950, rgb(88, 101, 242), 34);
+                canvas_.text({40, 400, SCREEN_W - 40, 440}, L"Discord opens a small Authorize box on your desktop the first time; click it once (take the headset off for that).", 19, rgb(150, 160, 180), false, 0);
+            }
+            if (!s.me.name.empty()) canvas_.text({40, 150, SCREEN_W - 40, 185}, L"Discord's user on this PC: " + s.me.name, 20, rgb(150, 160, 180), false, 0);
+            return;
+        }
+        if (discordView_ == 1) { drawDiscordList(L"MESSAGES", int(s.notes.size()), [&](int i, Rect r) {
+                const DiscordNote& n = s.notes[size_t(i)];
+                drawAvatar(n.from, {r.x0 + 8, r.y0 + 5, r.x0 + 64, r.y0 + 61}, rgb(60, 64, 90), 2);
+                canvas_.text({r.x0 + 76, r.y0 + 2, r.x1 - 12, r.y0 + 34}, n.from.name + (n.title.empty() || n.title == n.from.name ? L"" : L"  -  " + n.title), 22, rgb(240, 240, 245), true, 0);
+                canvas_.text({r.x0 + 76, r.y0 + 34, r.x1 - 12, r.y1 - 2}, n.text, 18, rgb(170, 180, 200), false, 0);
+            }); return; }
+        if (discordView_ == 2) { drawDiscordList(L"JOIN A CALL - SERVERS", int(dGuilds_.size()), [&](int i, Rect r) {
+                canvas_.text({r.x0 + 24, r.y0, r.x1 - 12, r.y1}, dGuilds_[size_t(i)].name, 26, rgb(240, 240, 245), true, 0);
+            }); return; }
+        if (discordView_ == 3) { drawDiscordList(L"JOIN A CALL - " + dGuildName_, int(dChannels_.size()), [&](int i, Rect r) {
+                canvas_.text({r.x0 + 24, r.y0, r.x1 - 12, r.y1}, L"\x25CF  " + dChannels_[size_t(i)].name, 26, rgb(240, 240, 245), true, 0);
+            }); return; }
+        // home: the channel and its people
+        header(L"DISCORD", false);
+        if (!s.me.name.empty()) {
+            drawAvatar(s.me, {SCREEN_W - 236, 14, SCREEN_W - 188, 62}, rgb(60, 64, 90), 2);
+            canvas_.text({SCREEN_W - 180, 14, SCREEN_W - 20, 62}, s.me.name, 20, rgb(200, 210, 230), false, 0);
+        }
+        button(DC_SIGNOUT, L"SIGN OUT", pressed_ == 951, rgb(50, 58, 84), 16);
+        if (!s.status.empty()) canvas_.text({24, 78, SCREEN_W - 24, 106}, s.status, 18, rgb(255, 170, 90), false, 0);
+        if (s.channelId.empty()) {
+            canvas_.text({0, 180, SCREEN_W, 230}, L"Not in a voice call", 32, rgb(200, 205, 220));
+            button({312, 260, 712, 340}, L"JOIN A CALL", pressed_ == 952, rgb(88, 101, 242), 30);
+        } else {
+            canvas_.text({24, 104, SCREEN_W - 24, 136}, L"In  " + s.channelName + L"   -   " + std::to_wstring(s.members.size()) + (s.members.size() == 1 ? L" person" : L" people"), 22, rgb(200, 210, 230), false, 0);
+            int n = std::min<int>(8, int(s.members.size()));
+            for (int i = 0; i < n; i++) {
+                const DiscordMember& m = s.members[size_t(i)];
+                int col = i % 4, row = i / 4;
+                int x = 24 + col * 244, y = 146 + row * 168;
+                Rect box{x + 66, y, x + 66 + 112, y + 112};
+                drawAvatar(m.user, box, m.speaking ? rgb(60, 220, 110) : rgb(50, 54, 72), m.speaking ? 6 : 3);
+                canvas_.text({x, y + 116, x + 244, y + 142}, m.user.name, 20, m.self ? rgb(90, 200, 255) : rgb(240, 240, 245), true);
+                std::wstring tag = m.deaf ? L"deafened" : m.mute ? L"muted" : m.speaking ? L"talking" : L"";
+                if (!tag.empty()) canvas_.text({x, y + 142, x + 244, y + 164}, tag, 16, m.speaking ? rgb(60, 220, 110) : rgb(255, 120, 120), false);
+            }
+        }
+        button(DC_MUTE, s.selfMute ? L"UNMUTE" : L"MUTE", pressed_ == 953, s.selfMute ? rgb(150, 50, 50) : rgb(50, 58, 84), 22);
+        button(DC_DEAF, s.selfDeaf ? L"UNDEAFEN" : L"DEAFEN", pressed_ == 954, s.selfDeaf ? rgb(150, 50, 50) : rgb(50, 58, 84), 22);
+        button(DC_LEAVE, s.channelId.empty() ? L"JOIN A CALL" : L"LEAVE CALL", pressed_ == 955, s.channelId.empty() ? rgb(88, 101, 242) : rgb(120, 50, 50), 22);
+        button(DC_MSGS, s.unread ? L"MESSAGES  +" + std::to_wstring(s.unread) : L"MESSAGES", pressed_ == 956, s.unread ? rgb(88, 101, 242) : rgb(50, 58, 84), 22);
+    }
+    void drawDiscordList(const std::wstring& title, int count, const std::function<void(int, Rect)>& row) {
+        header(title, true);
+        int pages = std::max(1, (count + DC_ROWS - 1) / DC_ROWS);
+        if (dPage_ >= pages) dPage_ = pages - 1;
+        if (dPage_ < 0) dPage_ = 0;
+        for (int i = 0; i < DC_ROWS; i++) {
+            int index = dPage_ * DC_ROWS + i;
+            if (index >= count) break;
+            Rect r = dRowRect(i);
+            canvas_.fill(r, pressed_ == 960 + i ? rgb(48, 56, 80) : rgb(30, 34, 50));
+            canvas_.fill({r.x0, r.y0, r.x0 + 6, r.y1}, rgb(88, 101, 242));
+            row(index, r);
+        }
+        if (count == 0) canvas_.text({0, 240, 904, 290}, dBusy_ ? L"Loading..." : L"Nothing here", 26, rgb(150, 160, 180));
+        button(DC_UP, L"\x25B2", pressed_ == 970, rgb(40, 44, 62), 40);
+        button(DC_DOWN, L"\x25BC", pressed_ == 971, rgb(40, 44, 62), 40);
+        canvas_.text({12, 536, 500, 568}, L"page " + std::to_wstring(dPage_ + 1) + L" of " + std::to_wstring(pages) + L"  -  " + std::to_wstring(count) + L" items", 18, rgb(130, 140, 160), false, 0);
+    }
+    void discordTouch(const Touch& t) {
+        const DiscordState& s = dstate_;
+        if (!discord_.configured()) { if (!t.down) pressed_ = -1; return; }
+        if (!s.authed) {
+            if (tapped(t, 950, DC_CONNECT) && s.pipe && !s.busy) discord_.authorize();
+            if (!t.down) pressed_ = -1;
+            return;
+        }
+        if (discordView_ != 0) {
+            if (tapped(t, 100, BACK_BUTTON)) { discordView_ = discordView_ == 3 ? 2 : 0; dPage_ = 0; return; }
+            if (tapped(t, 970, DC_UP)) { if (dPage_ > 0) dPage_--; return; }
+            if (tapped(t, 971, DC_DOWN)) { dPage_++; return; }
+            for (int i = 0; i < DC_ROWS; i++)
+                if (tapped(t, 960 + i, dRowRect(i))) {
+                    int index = dPage_ * DC_ROWS + i;
+                    if (discordView_ == 2 && index < int(dGuilds_.size())) { openDiscordChannels(dGuilds_[size_t(index)]); }
+                    else if (discordView_ == 3 && index < int(dChannels_.size())) { discord_.joinChannel(dChannels_[size_t(index)].id); discordView_ = 0; dPage_ = 0; }
+                    return;
+                }
+            if (!t.down) pressed_ = -1;
+            return;
+        }
+        if (tapped(t, 951, DC_SIGNOUT)) { discord_.signOut(); return; }
+        if (tapped(t, 953, DC_MUTE)) { discord_.setMute(!s.selfMute); return; }
+        if (tapped(t, 954, DC_DEAF)) { discord_.setDeaf(!s.selfDeaf); return; }
+        if (tapped(t, 955, DC_LEAVE) || (s.channelId.empty() && tapped(t, 952, {312, 260, 712, 340}))) {
+            if (s.channelId.empty()) openDiscordGuilds(); else discord_.leaveChannel();
+            return;
+        }
+        if (tapped(t, 956, DC_MSGS)) { discordView_ = 1; dPage_ = 0; discord_.markRead(); return; }
+        if (!t.down) pressed_ = -1;
+    }
+    void openDiscordGuilds() {
+        discordView_ = 2;
+        dPage_ = 0;
+        dGuilds_.clear();
+        dBusy_ = true;
+        discord_.listGuilds([this](std::vector<DiscordRef> guilds, std::wstring error) {
+            std::lock_guard<std::mutex> lock(pendingLock_);
+            pending_.push_back([this, guilds, error] { dGuilds_ = guilds; dBusy_ = false; if (!error.empty()) message_ = L"Discord: " + error; });
+        });
+    }
+    void openDiscordChannels(const DiscordRef& guild) {
+        discordView_ = 3;
+        dPage_ = 0;
+        dGuildName_ = guild.name;
+        dChannels_.clear();
+        dBusy_ = true;
+        discord_.listVoiceChannels(guild.id, [this](std::vector<DiscordRef> channels, std::wstring error) {
+            std::lock_guard<std::mutex> lock(pendingLock_);
+            pending_.push_back([this, channels, error] { dChannels_ = channels; dBusy_ = false; if (!error.empty()) message_ = L"Discord: " + error; });
+        });
+    }
+    // An incoming call, over whatever the tablet shows: who, ANSWER (join their call), IGNORE.
+    void drawCallOverlay() {
+        if (!dstate_.call.at) return;
+        const DiscordNote& c = dstate_.call;
+        canvas_.fill({0, 0, SCREEN_W, SCREEN_H}, rgb(10, 11, 16));
+        drawAvatar(c.from, {432, 70, 592, 230}, rgb(88, 101, 242), 6);
+        canvas_.text({0, 244, SCREEN_W, 294}, c.from.name + L" is calling", 36, rgb(245, 245, 250));
+        canvas_.text({0, 296, SCREEN_W, 326}, L"Discord", 20, rgb(150, 160, 180), false);
+        button(CALL_ANSWER, L"ANSWER", pressed_ == 980, rgb(40, 160, 80), 30);
+        button(CALL_IGNORE, L"IGNORE", pressed_ == 981, rgb(170, 40, 50), 30);
+    }
+    bool callTouch(const Touch& t) {
+        if (tapped(t, 980, CALL_ANSWER)) { discord_.joinChannel(dstate_.call.channelId); discord_.dismissCall(); return true; }
+        if (tapped(t, 981, CALL_IGNORE)) { discord_.dismissCall(); return true; }
+        if (!t.down) pressed_ = -1;
+        return true;  // nothing else while it rings
+    }
+
     void drawPlexLink() {
         canvas_.clear(rgb(14, 16, 24));
         header(L"LINK PLEX", true);
@@ -2624,7 +2888,8 @@ private:
     void render() {
         target_ = &screen_;
         draw();
-        if (hqWanted()) { target_ = &hq_; draw(); target_ = &screen_; }
+        drawCallOverlay();
+        if (hqWanted()) { target_ = &hq_; draw(); drawCallOverlay(); target_ = &screen_; }
     }
     void draw() {
         bool settings = settingsMode();
@@ -2633,6 +2898,14 @@ private:
             lastSettings_ = settings;
             if (settings) { buildPages(); message_.clear(); }  // a mod installed or removed meanwhile
         }
+        bool discord = discordMode();
+        if (discord != lastDiscordMode_) {
+            if (session_.alive()) releaseGameInput(); else resetInput();
+            lastDiscordMode_ = discord;
+            discordView_ = 0;
+            dPage_ = 0;
+        }
+        if (discord) { drawDiscord(); canvas_.opaque(); return; }
         if (settings) { drawSettings(); canvas_.opaque(); return; }
         switch (mode_) {
             case Mode::Launcher: drawLauncher(); break;
@@ -2676,6 +2949,16 @@ private:
     bool mcLight_ = true;               // SETTINGS > TABLET > Minecraft light settings
     bool skipAds_ = true;               // SETTINGS > TABLET > Skip YouTube ads (in the browser, in the background too)
     Thumbs thumbs_;                     // video pictures for the list pages
+    Discord discord_;                   // the DISCORD tab (discord.h)
+    DiscordState dstate_;               // what the page and the HUD block show
+    uint64_t dstateSerial_ = 0, dsharedBeat_ = 0;
+    std::wstring dClientId_, dClientSecret_;
+    int discordView_ = 0, dPage_ = 0;  // 0 home, 1 messages, 2 servers, 3 voice channels
+    std::vector<DiscordRef> dGuilds_, dChannels_;
+    std::wstring dGuildName_;
+    bool dBusy_ = false, lastDiscordMode_ = false;
+    arcade::DiscordShared* dshared_ = nullptr;  // the HUD's block
+    HANDLE dmap_ = nullptr;
     ShareServer share_;                 // SHARE MY TABLET / SPLIT SCREEN
     ShareClient watch_;                 // WATCH A FRIEND
     Canvas split_;                      // the split screen's picture (composeSplit)
