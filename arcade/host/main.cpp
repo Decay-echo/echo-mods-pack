@@ -113,6 +113,11 @@ public:
             readTouches();
             runPending();
             session_.poll();
+            {
+                bool onTablet = (shared_->pageVisible != 0 || standalone_ || shared_->dockState == arcade::Docked) &&
+                                (mode_ == Mode::Running || mode_ == Mode::Menu);
+                session_.background(onTablet, freeze_);
+            }
             if ((mode_ == Mode::Running || mode_ == Mode::Menu) && !session_.alive()) appClosed();
             pollFreeze(now);
             pollMinecraftFocus(now);
@@ -1097,6 +1102,25 @@ private:
         std::wstring tweaks = tweaksPath(), hud = hudIni(), disc = discIni();
         bool hasHud = exists(hud);
 
+        // Echo's own voice chat mode, one button each: the game's "voipmode" setting switched
+        // live by the plugin (the game keeps it in memory) and written to settings_mp_v2.json
+        // so it stays after a restart. The lit button is the mode the game reports.
+        {
+            Page vp{L"VOICE"};
+            static const wchar_t* const labels[4] = {L"MUTED", L"OPEN MIC", L"PUSH TO TALK", L"PUSH TO MUTE"};
+            static const wchar_t* const notes[4] = {L"Nobody hears you", L"Your mic is always on", L"Hold the button to talk",
+                                                    L"Hold the button to go quiet"};
+            for (int m = 0; m < 4; m++) {
+                Option o{labels[m], notes[m], Kind::Action};
+                o.get = [this, m] { return voiceMode() == m ? 1.f : 0.f; };
+                o.set = [this, m](float) { setVoiceMode(m); };
+                o.text = [m](float v) { return std::wstring(v != 0 ? L"\x25CF  " : L"") + labels[m]; };
+                vp.options.push_back(o);
+            }
+            vp.footer = L"The lit one is what Echo uses now. Same as Echo's Settings > Audio; it stays after a restart.";
+            pages_.push_back(vp);
+        }
+
         Page tablet{L"TABLET"};
         Option size = slider(L"Tablet size", L"The hand tablet, bigger or smaller", tweaks, L"tablet", L"scale", .5f, 4.f, .05f, 1.f, L"%.2fx");
         size.set = [this](float v) { setTabletScale(v); };
@@ -1208,25 +1232,6 @@ private:
             p.options.push_back(toggle(L"Hide it from Echo", L"Echo doesn't see that button at all", disc, L"summon", L"hide_from_echo", false));
             p.footer = L"The personal disc itself goes back with RESTORE.cmd in its own folder.";
             pages_.push_back(p);
-        }
-
-        // Echo's own voice chat mode, one button each: the game's "voipmode" setting switched
-        // live by the plugin (the game keeps it in memory) and written to settings_mp_v2.json
-        // so it stays after a restart. The lit button is the mode the game reports.
-        {
-            Page vp{L"VOICE"};
-            static const wchar_t* const labels[4] = {L"MUTED", L"OPEN MIC", L"PUSH TO TALK", L"PUSH TO MUTE"};
-            static const wchar_t* const notes[4] = {L"Nobody hears you", L"Your mic is always on", L"Hold the button to talk",
-                                                    L"Hold the button to go quiet"};
-            for (int m = 0; m < 4; m++) {
-                Option o{labels[m], notes[m], Kind::Action};
-                o.get = [this, m] { return voiceMode() == m ? 1.f : 0.f; };
-                o.set = [this, m](float) { setVoiceMode(m); };
-                o.text = [m](float v) { return std::wstring(v != 0 ? L"\x25CF  " : L"") + labels[m]; };
-                vp.options.push_back(o);
-            }
-            vp.footer = L"The lit one is what Echo uses now. Same as Echo's Settings > Audio; it stays after a restart.";
-            pages_.push_back(vp);
         }
 
         Page normal{L"NORMAL"};

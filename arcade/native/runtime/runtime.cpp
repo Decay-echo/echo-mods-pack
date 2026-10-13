@@ -487,6 +487,12 @@ void start(HMODULE self) {
         }
         tweaks::start(pluginDir);  // independent of the tablet: must beat the game's first Oculus FOV query
         voice::hookEarly(reinterpret_cast<unsigned char*>(GetModuleHandleW(nullptr)));  // must beat the game's settings load
+        // Echo above the arcade's apps in the scheduler (a Minecraft launcher on a small CPU made
+        // Echo stutter); echo_tweaks.ini [cpu] echo_above_normal=0 leaves the priority alone.
+        if (GetPrivateProfileIntW(L"cpu", L"echo_above_normal", 1, (pluginDir + L"\\EchoArcade\\echo_tweaks.ini").c_str()) != 0) {
+            bool ok = SetPriorityClass(GetCurrentProcess(), ABOVE_NORMAL_PRIORITY_CLASS) != FALSE;
+            logf("cpu: Echo VR %s above-normal priority", ok ? "runs at" : "could not get");
+        }
         tablet::start(pluginDir);
         // Hooks and the probe D3D12 device are created off the loader thread.
         HANDLE t = CreateThread(nullptr, 0, [](LPVOID) -> DWORD { initialize(); return 0; }, nullptr, 0, nullptr);

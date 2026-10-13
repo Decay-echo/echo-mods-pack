@@ -296,7 +296,10 @@ bool Session::launch(AppId id, const std::wstring& target, double startSeconds,
     si.dwFlags = STARTF_USESHOWWINDOW;
     si.wShowWindow = SW_SHOWNOACTIVATE;
     PROCESS_INFORMATION pi{};
-    if (!CreateProcessW(exe.c_str(), cmd.data(), nullptr, nullptr, FALSE, CREATE_SUSPENDED, nullptr, cwd.c_str(), &si, &pi)) {
+    // A desktop game and its launcher start below normal priority (their children inherit it):
+    // Echo keeps the cores until FREEZE plays the game (background() raises it then).
+    DWORD flags = CREATE_SUSPENDED | (isDesktop(id) ? BELOW_NORMAL_PRIORITY_CLASS : 0);
+    if (!CreateProcessW(exe.c_str(), cmd.data(), nullptr, nullptr, FALSE, flags, nullptr, cwd.c_str(), &si, &pi)) {
         hostLog("launch failed (%lu): %ls", GetLastError(), cmd.c_str());
         return false;
     }
@@ -429,10 +432,65 @@ void Session::quit() {
     }
 }
 
+namespace {
+using NtProcessFn = LONG(NTAPI*)(HANDLE);
+NtProcessFn ntProcess(const char* name) {
+    HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+    return ntdll ? reinterpret_cast<NtProcessFn>(GetProcAddress(ntdll, name)) : nullptr;
+}
+bool suspendProcess(DWORD pid, bool suspend) {
+    static NtProcessFn stop = ntProcess("NtSuspendProcess"), go = ntProcess("NtResumeProcess");
+    NtProcessFn f = suspend ? stop : go;
+    if (!f) return false;
+    HANDLE h = OpenProcess(PROCESS_SUSPEND_RESUME, FALSE, pid);
+    if (!h) return false;
+    bool ok = f(h) >= 0;
+    CloseHandle(h);
+    return ok;
+}
+void priorityOf(DWORD pid, DWORD cls) {
+    HANDLE h = OpenProcess(PROCESS_SET_INFORMATION, FALSE, pid);
+    if (h) { SetPriorityClass(h, cls); CloseHandle(h); }
+}
+}  // namespace
+
+void Session::background(bool shown, bool playing) {
+    if (!process_ || !isDesktop(id_)) return;
+    DWORD gamePid = 0;
+    if (id_ == AppId::Minecraft && minecraftGame_) GetWindowThreadProcessId(minecraftGame_, &gamePid);
+    if (id_ == AppId::EchoInner) gamePid = pid_;
+    // Minecraft's game: suspended while nobody looks at it or plays it (a paused Java game still
+    // burns a core or two on a small CPU). Echo in Echo is left running: suspended, it would
+    // drop off the server.
+    bool suspend = id_ == AppId::Minecraft && gamePid && !shown && !playing;
+    if (gameSuspended_ && (!suspend || suspendedPid_ != gamePid)) {
+        suspendProcess(suspendedPid_, false);
+        gameSuspended_ = false;
+        hostLog("minecraft: running again (%s)", playing ? "FREEZE" : "on the tablet");
+    }
+    if (suspend && !gameSuspended_ && suspendProcess(gamePid, true)) {
+        gameSuspended_ = true;
+        suspendedPid_ = gamePid;
+        hostLog("minecraft: suspended (not on the tablet; no CPU until it is)");
+    }
+    int want = playing ? 1 : 0;
+    if (want != lastPriority_) {
+        lastPriority_ = want;
+        DWORD cls = playing ? NORMAL_PRIORITY_CLASS : BELOW_NORMAL_PRIORITY_CLASS;
+        if (gamePid) priorityOf(gamePid, cls);
+        for (DWORD p : owned_)
+            if (p != gamePid) priorityOf(p, BELOW_NORMAL_PRIORITY_CLASS);  // launchers stay low
+        hostLog("%s: %s priority", id_ == AppId::Minecraft ? "minecraft" : "echo in echo", playing ? "normal (played)" : "below normal");
+    }
+}
+
 void Session::kill() {
     mpv_.disconnect();
     capture_.stop();
     window_ = nullptr;
+    if (gameSuspended_) suspendProcess(suspendedPid_, false);  // ended awake, so nothing stays stuck
+    gameSuspended_ = false;
+    lastPriority_ = -1;
     for (DWORD pid : owned_) minecraft::killTree(pid);  // the app, a launcher, the game: all of it
     owned_.clear();
     minecraft::writeOwned(owned_);

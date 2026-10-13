@@ -53,6 +53,10 @@ public:
     WindowCapture& capture() { return capture_; }
     void quit();                 // polite request, then forced after a grace period
     void kill();
+    // CPU for Echo: a desktop game (Minecraft, Echo in Echo) runs at low priority, at normal
+    // only while it is played (FREEZE); Minecraft's game is suspended outright (no CPU at
+    // all) while the tablet does not show it and nobody plays it.
+    void background(bool shown, bool playing);
     uint64_t age() const { return GetTickCount64() - started_; }
     // How long it has had no window: since launch, or since its window went away (RetroArch
     // replaces its window when a core starts).
@@ -84,6 +88,9 @@ private:
     // Every process this session put on the tablet (the one it started, a launcher's, the
     // game's): all ended on kill(), and by the watchdog if the host dies first (Echo closing).
     std::vector<DWORD> owned_;
+    bool gameSuspended_ = false;     // Minecraft's game process is suspended right now
+    DWORD suspendedPid_ = 0;
+    int lastPriority_ = -1;          // 1 normal (played), 0 below normal
     void own(DWORD pid);
     bool padState_[PadCount] = {};
     int16_t stick_[2][2] = {};

@@ -65,8 +65,8 @@ using Fallback = void (*)(void*, void*, void*, U);
 using Fire = U (*)(void*, unsigned, void*, float, void*, void*, int, int);
 Start startOriginal;
 Destroy destroyOriginal;
-Override overrideTexture;
-Fallback fallbackArt;
+Override overrideTexture;  // the engine's OverrideTexture (its trampoline once hooked: our own calls go straight through)
+Fallback fallbackArt;      // the engine's FallbackArt, likewise
 Fire fireOriginal;
 
 arcade::Shared* shared = nullptr;
@@ -299,6 +299,36 @@ void restoreArt(void* cs, unsigned index, U name, U serverKey) {
 
 bool slotStill(const Dock& d) {
     return d.index < at<unsigned short>(d.cs, 0xfc) && at<U>(at<P>(d.cs, 0x108), size_t(d.index) * 16) == d.handle;
+}
+
+// The game changing the art of a docked poster itself (its rotating displays swap art on a
+// timer, through the same two calls, without touching +0x08): skipped while the poster is
+// docked, so the arcade stays. Our own calls use the trampolines and never come through here.
+bool dockedItem(void* cs, void* item) {
+    for (auto& d : docks)
+        if (d.cs == cs && at<P>(cs, 0x100) + size_t(d.index) * POSTER_STRIDE == item) return true;
+    return false;
+}
+int artKept = 0;
+int overrideDetour(void* cs, void* key, void* item, U slice) {
+    {
+        std::unique_lock<std::mutex> lock(mutex, std::try_to_lock);
+        if (lock.owns_lock() && dockedItem(cs, item)) {
+            if (artKept++ < 10) logf("posters: the game changed the art of a docked poster (slice %llu); the arcade stays", static_cast<unsigned long long>(slice));
+            return 0;
+        }
+    }
+    return overrideTexture(cs, key, item, slice);
+}
+void fallbackDetour(void* cs, void* key, void* item, U slice) {
+    {
+        std::unique_lock<std::mutex> lock(mutex, std::try_to_lock);
+        if (lock.owns_lock() && dockedItem(cs, item)) {
+            if (artKept++ < 10) logf("posters: the game put its own art back on a docked poster (slice %llu); the arcade stays", static_cast<unsigned long long>(slice));
+            return;
+        }
+    }
+    fallbackArt(cs, key, item, slice);
 }
 
 // The other posters of the same model in that system get their own art re-applied, each with
@@ -804,14 +834,14 @@ bool install(unsigned char* exe, arcade::Shared* s) {
     for (auto& sig : SIGNATURES)
         if (memcmp(exe + sig.rva, sig.bytes, 16) != 0) { logf("posters: code signature mismatch at %x; dock disabled", sig.rva); return false; }
     buildGeometry();
-    overrideTexture = reinterpret_cast<Override>(exe + RVA_OVERRIDE);
-    fallbackArt = reinterpret_cast<Fallback>(exe + RVA_FALLBACK);
     handled = shared->dockSerial;  // ignore requests from before this session
     shared->dockDone = handled;
     shared->dockState = arcade::Undocked;
     bool ok = hook(exe, RVA_START, reinterpret_cast<void*>(start), reinterpret_cast<void**>(&startOriginal)) &&
               hook(exe, RVA_DESTROY, reinterpret_cast<void*>(destroy), reinterpret_cast<void**>(&destroyOriginal)) &&
-              hook(exe, RVA_FIRE, reinterpret_cast<void*>(fire), reinterpret_cast<void**>(&fireOriginal));
+              hook(exe, RVA_FIRE, reinterpret_cast<void*>(fire), reinterpret_cast<void**>(&fireOriginal)) &&
+              hook(exe, RVA_OVERRIDE, reinterpret_cast<void*>(overrideDetour), reinterpret_cast<void**>(&overrideTexture)) &&
+              hook(exe, RVA_FALLBACK, reinterpret_cast<void*>(fallbackDetour), reinterpret_cast<void**>(&fallbackArt));
     if (!ok) { fault = true; return false; }
     logf("posters: dock ready: %zu posters, %zu face meshes", table.size(), meshes.size());
     return true;
