@@ -133,6 +133,7 @@ struct Possession {
     int team = -1;             // who has the disc: 0 blue, 1 orange, -1 nobody
     std::string holder;        // their name
     int myTeam = -1;           // the team of the player this game runs for (client_name)
+    int bounces = -1;          // disc.bounce_count (-1: not in the answer)
 };
 
 inline Possession readSession(const Json& doc) {
@@ -146,6 +147,8 @@ inline Possession readSession(const Json& doc) {
     if (const Json* id = doc.get("sessionid"); id && id->type == Json::String) p.session = id->s;
     if (const Json* v = doc.get("blue_points"); v && v->type == Json::Number) p.points[0] = int(v->n);
     if (const Json* v = doc.get("orange_points"); v && v->type == Json::Number) p.points[1] = int(v->n);
+    if (const Json* disc = doc.get("disc"))
+        if (const Json* v = disc->get("bounce_count"); v && v->type == Json::Number) p.bounces = int(v->n);
     const Json* me = doc.get("client_name");
     for (size_t t = 0; t < teams->items.size() && t < 3; t++) {
         const Json* players = teams->items[t].get("players");
@@ -164,8 +167,10 @@ inline Possession readSession(const Json& doc) {
 }
 
 // ---- the chain ----------------------------------------------------------------------------
-// A pass: the disc goes from one player to a teammate (loose in between is fine). The other
-// team getting it breaks the chain. A goal by the team with the chain shows it big for a bit.
+// A pass: the disc goes from one player straight to a teammate. If it bounced on the way
+// (the API's bounce count went up while it was loose), the catch doesn't count; the chain
+// goes on. The other team getting it breaks the chain. A goal by the team with the chain
+// shows it big for a bit.
 constexpr double kPassPopSeconds = 1.0;   // how long "+1" stays up
 constexpr double kPassGoalSeconds = 2.0;  // the goal flash: three blinks
 constexpr float kPassGoalScale = 1.5f;
@@ -177,12 +182,16 @@ struct PassCounter {
     double popAt = -1;
     double goalAt = -1;
     int goalPasses = 0, goalTeam = -1;
+    bool loose = false;                       // nobody has it since the last holder
+    int looseFirst = -1, looseMax = -1;       // the bounce count when it got loose, and the most seen since
+    int bounced = 0;                          // catches not counted because the disc bounced first
 
     void breakChain() {
         team = -1;
         passes = 0;
         holder.clear();
         popAt = -1;
+        loose = false;
     }
     void update(const Possession& p, double t) {
         if (!p.ok) {  // menus, lobby, no API: start over next match
@@ -214,7 +223,15 @@ struct PassCounter {
         }
         if (p.scoring) return;                    // the goal's points come next: keep the chain for them
         if (!p.playing) { breakChain(); return; }  // round over, round start, pause
-        if (p.team < 0) return;  // in the air or loose: the chain waits
+        if (p.team < 0) {  // in the air or loose: the chain waits, and the bounces are watched
+            if (!loose) { loose = true; looseFirst = looseMax = p.bounces; }
+            else looseMax = std::max(looseMax, p.bounces);
+            return;
+        }
+        // Whether Echo resets the count when the disc is thrown or when it is grabbed, a rise
+        // while it was loose is a bounce. Seen in nobody's hand (under 0.1 s): no bounce.
+        bool bouncedFlight = loose && looseFirst >= 0 && looseMax > looseFirst;
+        loose = false;
         if (p.team != team) {
             breakChain();
             team = p.team;
@@ -222,8 +239,9 @@ struct PassCounter {
             return;
         }
         if (p.holder != holder) {
-            passes++;
             holder = p.holder;
+            if (bouncedFlight) { bounced++; return; }
+            passes++;
             popAt = t;
         }
     }

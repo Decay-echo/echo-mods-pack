@@ -322,11 +322,18 @@ DWORD WINAPI pollPasses(LPVOID) {
             answering = got;
             logf(got ? "pass counter: Echo's API answers" : "pass counter: no answer from Echo's API (not in a match, or API access off)");
         }
+        int bouncedBefore, bouncedAfter, passesAfter;
         {
             std::lock_guard<std::mutex> g(stateLock);
+            bouncedBefore = state.passes.bounced;
             state.passes.update(p, now());
+            bouncedAfter = state.passes.bounced;
+            passesAfter = state.passes.passes;
             state.apiTeam = p.myTeam;
         }
+        static int bounceLogBudget = 20;
+        if (bouncedAfter != bouncedBefore && bounceLogBudget-- > 0)
+            logf("pass counter: %s caught it after a bounce: not counted (chain stays at %d)", p.holder.c_str(), passesAfter);
         Sleep(got ? 100 : 1000);  // 10 a second in a match (a catch lasts longer); once a second otherwise
     }
 }
@@ -460,6 +467,8 @@ struct Overlay {  // the render thread's side
     QuadLayer quads[12];
     double frameUs = 0, frameMaxUs = 0, statsAt = -1;  // our part of each frame, for the log
     unsigned frames = 0;
+    double lastFrameAt = -1, gapWorstMs = 0;             // Echo's own frame pace: long gaps between its submits
+    unsigned longFrames = 0;
     int errorBudget = 10;
 } ov;
 
@@ -794,20 +803,30 @@ unsigned refresh(Session session, const QuadLayer** out) {
     return layout(ov.lastJob, out);
 }
 
-// Our part of each frame, summed up in the log once a minute.
+// Our part of each frame, and Echo's own frame pace, summed up in the log once a minute: a
+// "long frame" is a gap of over 20 ms between two of Echo's submits (a dropped frame at 90 Hz,
+// whatever caused it).
 void account(double t0) {
     double t = now(), us = (t - t0) * 1e6;
     ov.frameUs += us;
     ov.frames++;
     if (us > ov.frameMaxUs) ov.frameMaxUs = us;
+    if (ov.lastFrameAt >= 0) {
+        double gapMs = (t0 - ov.lastFrameAt) * 1e3;
+        if (gapMs > 20) ov.longFrames++;
+        if (gapMs > ov.gapWorstMs) ov.gapWorstMs = gapMs;
+    }
+    ov.lastFrameAt = t0;
     if (ov.statsAt < 0) ov.statsAt = t;
     if (t - ov.statsAt < 60) return;
     unsigned pictures = painter.pictures.exchange(0);
     long long busy = painter.busyUs.exchange(0);
-    logf("last %.0f s: %u frames, HUD %.0f us avg / %.0f us max on Echo's render thread; %u pictures painted (%.0f us each, draw thread)",
-         t - ov.statsAt, ov.frames, ov.frameUs / std::max(1u, ov.frames), ov.frameMaxUs, pictures, pictures ? double(busy) / pictures : 0.0);
-    ov.frameUs = ov.frameMaxUs = 0;
-    ov.frames = 0;
+    logf("last %.0f s: %u frames, HUD %.0f us avg / %.0f us max on Echo's render thread; %u pictures painted (%.0f us each, draw thread); "
+         "Echo's pace: %u long frames (over 20 ms), worst gap %.0f ms",
+         t - ov.statsAt, ov.frames, ov.frameUs / std::max(1u, ov.frames), ov.frameMaxUs, pictures, pictures ? double(busy) / pictures : 0.0,
+         ov.longFrames, ov.gapWorstMs);
+    ov.frameUs = ov.frameMaxUs = ov.gapWorstMs = 0;
+    ov.frames = ov.longFrames = 0;
     ov.statsAt = t;
 }
 
