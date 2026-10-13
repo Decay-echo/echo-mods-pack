@@ -56,6 +56,7 @@ struct Config {
     std::wstring minecraft, curseforge, modrinth, prism;  // Minecraft launchers ([paths]; empty = found by itself)
     bool moviesTile = false;          // MOVIES on the launcher instead of MINECRAFT
     bool sharing = true;              // the SPLIT SCREEN / SHARE MY TABLET / WATCH A FRIEND tiles (echo_tweaks.ini [share] tiles)
+    bool minecraftSleep = false;      // Minecraft's game suspended outright while hidden (echo_tweaks.ini [cpu] minecraft_sleep); off: idle priority
     bool echoInEcho = false;          // the ECHO VR tile (a second Echo VR in desktop mode); off unless asked for
     float minecraftLook = 3.f;        // FREEZE in Minecraft: mouse pixels per tick at full stick
     int balatroPort = 55410, retroCmdPort = 55355, retroPadPort = 55400;

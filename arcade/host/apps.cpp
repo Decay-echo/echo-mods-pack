@@ -501,10 +501,11 @@ void Session::background(bool shown, bool playing) {
     DWORD gamePid = 0;
     if (id_ == AppId::Minecraft && minecraftGame_) GetWindowThreadProcessId(minecraftGame_, &gamePid);
     if (id_ == AppId::EchoInner) gamePid = pid_;
-    // Minecraft's game: suspended while nobody looks at it or plays it (a paused Java game still
-    // burns a core or two on a small CPU). Echo in Echo is left running: suspended, it would
-    // drop off the server.
-    bool suspend = id_ == AppId::Minecraft && gamePid && !shown && !playing;
+    // Minecraft's game while nobody looks at it or plays it: idle priority (it runs on, so a
+    // server keeps it and a start-up finishes), or, with [cpu] minecraft_sleep, suspended
+    // outright as before (no CPU at all, but it never loads or stays on a server meanwhile).
+    // Echo in Echo is never suspended: it would drop off the server.
+    bool suspend = config_.minecraftSleep && id_ == AppId::Minecraft && gamePid && !shown && !playing;
     if (gameSuspended_ && (!suspend || suspendedPid_ != gamePid)) {
         suspendProcess(suspendedPid_, false);
         gameSuspended_ = false;
@@ -515,20 +516,20 @@ void Session::background(bool shown, bool playing) {
         suspendedPid_ = gamePid;
         hostLog("minecraft: suspended (not on the tablet; no CPU until it is)");
     }
-    // The game's GPU work behind Echo's, once its process is known (both when it is played and
-    // when it is only watched: Echo's frames come first either way).
-    if (gamePid && gamePid != gpuLoweredPid_) {
-        gpuLoweredPid_ = gamePid;
-        if (gpuPriorityOf(gamePid, 1)) hostLog("%s: GPU priority below normal (Echo's frames first)", id_ == AppId::Minecraft ? "minecraft" : "echo in echo");
-    }
-    int want = playing ? 1 : 0;
-    if (want != lastPriority_) {
+    // CPU and GPU by what the game is to the player right now: played (FREEZE) -> normal on
+    // both (Echo itself runs above normal, so it still comes first); shown on the tablet ->
+    // below normal on both; hidden -> idle CPU, GPU below normal.
+    int want = playing ? 2 : shown ? 1 : 0;
+    if (gamePid && (want != lastPriority_ || gamePid != gpuLoweredPid_)) {
         lastPriority_ = want;
-        DWORD cls = playing ? NORMAL_PRIORITY_CLASS : BELOW_NORMAL_PRIORITY_CLASS;
-        if (gamePid) priorityOf(gamePid, cls);
+        gpuLoweredPid_ = gamePid;
+        DWORD cls = playing ? NORMAL_PRIORITY_CLASS : shown ? BELOW_NORMAL_PRIORITY_CLASS : IDLE_PRIORITY_CLASS;
+        priorityOf(gamePid, cls);
+        bool gpu = gpuPriorityOf(gamePid, playing ? 2 : 1);
         for (DWORD p : owned_)
             if (p != gamePid) priorityOf(p, BELOW_NORMAL_PRIORITY_CLASS);  // launchers stay low
-        hostLog("%s: %s priority", id_ == AppId::Minecraft ? "minecraft" : "echo in echo", playing ? "normal (played)" : "below normal");
+        hostLog("%s: %s priority, GPU %s%s", id_ == AppId::Minecraft ? "minecraft" : "echo in echo",
+                playing ? "normal (played)" : shown ? "below normal (shown)" : "idle (hidden)", playing ? "normal" : "below normal", gpu ? "" : " (GPU priority not set)");
     }
 }
 

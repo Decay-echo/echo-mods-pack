@@ -63,13 +63,17 @@ inline void prepareOptions(bool light) {
     }
     bool changed = false;
     std::string report;
-    // key -> wanted value; a capped one (max > 0) is only lowered
+    // key -> wanted value; a capped one (max > 0) is only lowered. What the light settings
+    // lowered is remembered in minecraft_before.ini and put back once the toggle is off.
     struct Want { const char* key; std::string value; int max; bool always; };
     std::vector<Want> wants = {{"fullscreen", "false", 0, true}, {"pauseOnLostFocus", "true", 0, true},
                                {"maxFps", std::to_string(TABLET_FPS), 0, true}, {"enableVsync", "false", 0, true}};
-    if (light)
-        wants.insert(wants.end(), {{"renderDistance", "8", 8, false}, {"simulationDistance", "6", 6, false},
-                                   {"renderClouds", "false", 0, false}, {"entityShadows", "false", 0, false}});
+    const Want lightWants[] = {{"renderDistance", "8", 8, false}, {"simulationDistance", "6", 6, false},
+                               {"renderClouds", "false", 0, false}, {"entityShadows", "false", 0, false}};
+    if (light) wants.insert(wants.end(), std::begin(lightWants), std::end(lightWants));
+    char before[MAX_PATH] = "";
+    ExpandEnvironmentStringsA("%LOCALAPPDATA%\\EchoArcade\\minecraft_before.ini", before, MAX_PATH);
+    auto remembered = [&](const char* key) { char v[64] = ""; GetPrivateProfileStringA("options", key, "", v, sizeof v, before); return std::string(v); };
     for (auto& w : wants) {
         bool seen = false;
         for (auto& line : lines) {
@@ -78,11 +82,25 @@ inline void prepareOptions(bool light) {
             std::string value = line.substr(line.find(':') + 1);
             if (w.max > 0 && atoi(value.c_str()) <= w.max) break;  // already low enough
             if (value == w.value) break;
+            if (!w.always && remembered(w.key).empty()) WritePrivateProfileStringA("options", w.key, value.c_str(), before);  // theirs, for later
             line = std::string(w.key) + ":" + w.value;
             changed = true;
             report += std::string(report.empty() ? "" : ", ") + w.key + " " + value + " -> " + w.value;
         }
         if (!seen && w.always) { lines.push_back(std::string(w.key) + ":" + w.value); changed = true; report += std::string(report.empty() ? "" : ", ") + w.key + " " + w.value; }
+    }
+    if (!light) {  // the toggle is off: what was lowered goes back, where it still sits at our value
+        for (auto& w : lightWants) {
+            std::string orig = remembered(w.key);
+            if (orig.empty()) continue;
+            for (auto& line : lines)
+                if (line.substr(0, line.find(':')) == w.key && line.substr(line.find(':') + 1) == w.value) {
+                    line = std::string(w.key) + ":" + orig;
+                    changed = true;
+                    report += std::string(report.empty() ? "" : ", ") + w.key + " back to " + orig;
+                }
+            WritePrivateProfileStringA("options", w.key, nullptr, before);
+        }
     }
     if (!changed) return;
     std::string out;

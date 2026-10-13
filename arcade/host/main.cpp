@@ -1345,6 +1345,7 @@ private:
         autoDock_ = GetPrivateProfileIntW(L"dock", L"auto", 1, t.c_str()) != 0;  // on unless turned off
         posterHq_ = _wcsicmp(iniText(t, L"poster", L"quality", L"normal").c_str(), L"high") == 0;
         sidesOn_ = GetPrivateProfileIntW(L"sides", L"enabled", 1, t.c_str()) != 0;
+        config_.minecraftSleep = GetPrivateProfileIntW(L"cpu", L"minecraft_sleep", 0, t.c_str()) != 0;
         bool sharing = GetPrivateProfileIntW(L"share", L"tiles", 1, t.c_str()) != 0;
         if (sharing != config_.sharing) {
             config_.sharing = sharing;
@@ -1413,7 +1414,11 @@ private:
         sides.get = [this] { return sidesOn_ ? 1.f : 0.f; };
         sides.set = [this, tweaks](float v) { sidesOn_ = v != 0; iniWrite(tweaks, L"sides", L"enabled", sidesOn_ ? L"1" : L"0"); };
         tablet.options.push_back(sides);
-        Option light{L"Minecraft light settings", L"When Minecraft starts: render distance 8, simulation 6, no clouds or entity shadows (only ever lowered), so Echo keeps its frames", Kind::Toggle};
+        Option mcSleep{L"Minecraft sleeps when hidden", L"Off: hidden Minecraft runs on at the lowest priority (servers keep you). On: frozen outright, no CPU at all, for the smallest PCs", Kind::Toggle};
+        mcSleep.get = [this] { return config_.minecraftSleep ? 1.f : 0.f; };
+        mcSleep.set = [this, tweaks](float v) { iniWrite(tweaks, L"cpu", L"minecraft_sleep", v != 0 ? L"1" : L"0"); loadSettings(); };
+        tablet.options.push_back(mcSleep);
+        Option light{L"Minecraft light settings", L"When Minecraft starts: render distance 8, simulation 6, no clouds or entity shadows (your own values come back when this is off)", Kind::Toggle};
         light.get = [this] { return mcLight_ ? 1.f : 0.f; };
         light.set = [this, tweaks](float v) {
             mcLight_ = v != 0;
@@ -2430,9 +2435,11 @@ private:
             if (live) { for (auto& h : sideHash_) h = 0; lastMediaPage_ = 0; }
             hostLog("sides: %s", live ? "on (the four posters beside the board get their own pictures)" : "off");
         }
-        if (!live || now - lastSides_ < 66) return;
-        lastSides_ = now;
+        if (!live) return;
         for (int i = 0; i < arcade::SIDES; i++) {
+            uint64_t every = i == SIDE_LISTEN ? 125 : 500;  // the scrolling line moves; the rest hardly changes
+            if (now - lastSide_[i] < every) continue;
+            lastSide_[i] = now;
             target_ = &side_[i];
             if (config_.sharing) {
                 switch (i) {
@@ -3335,7 +3342,7 @@ private:
     Canvas split_;                      // the split screen's picture (composeSplit)
     Canvas side_[arcade::SIDES];        // the side posters' pictures
     uint64_t sideHash_[arcade::SIDES] = {};
-    uint64_t lastSides_ = 0;
+    uint64_t lastSide_[arcade::SIDES] = {};
     bool sidesOn_ = true, sidesLive_ = false;  // SETTINGS > TABLET > Side posters; on right now (docked)
     uint64_t splitBarUntil_ = 0;
     bool landing_ = false;              // tapped(): this touch is a new poke (see onTouch)
