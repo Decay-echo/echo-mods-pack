@@ -16,6 +16,8 @@ Everything runs on your own PC. Nothing here is networked and only you see your 
 
 Needs **EchoLoader** in the game (the community Echo VR installer sets it up). The HUD lines part also needs **NvrAssetPatches**; without it the installer skips that part and tells you.
 
+**Already have another tablet mod** (TabletDoom, TabletMusic, anything that changes the tablet)? Just run INSTALL.cmd: it puts Echo's stock tablet data back first, from the backup that mod kept, removes that mod's files from the tablet data, and then installs Echo Arcade. If it can't find a stock copy it stops and tells you (run that mod's own restore, or reinstall Echo VR, then INSTALL again).
+
 To remove everything, close Echo VR and double-click **`UNINSTALL.cmd`** (or, in the game, tablet **Settings > NORMAL > NORMAL TABLET**, which does it when you close Echo). Echo VR gets its own files back. Running `INSTALL.cmd` again updates or repairs the install. An update keeps your HUD settings; to switch to a new version's HUD layout, run `INSTALL.cmd --reset-hud` (your old settings are kept as `settings.ini.old`).
 
 Only want one of them? `INSTALL.cmd --no-arcade` (HUD only) or `INSTALL.cmd --no-hud` (arcade only).

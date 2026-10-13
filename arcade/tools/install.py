@@ -43,6 +43,10 @@ KNOWN_GAMES = [Path(r'C:\Program Files\Meta Horizon\Software\Software\ready-at-d
 STATE = ROOT / 'install_state.json'
 ORIGINAL = ROOT / 'backups/original'  # a copy of the stock manifest, kept once seen
 MID = '48037dc70b0ecab2'
+# The stock tablet data of the final Echo VR build: three packages (MID, MID_1, MID_2) and this
+# manifest. Any other tablet mod appends packages past the third; that is how it is recognised.
+STOCK_NPKG = 3
+STOCK_SHA256 = 'e2ae781d32a7fdea89b67a638f33dbab997117c157544b76efa20368eb498fd9'
 EXE_TIMESTAMP, EXE_SIZE = 1683152886, 35852288
 TAB_SCHEMA = 2  # bump when build_arcade_tab.py output changes (2: DOCK poster screen)
 RETROARCH = ROOT / 'apps/retroarch/retroarch.exe'
@@ -134,16 +138,46 @@ def arcade_in(manifest: bytes, P, ManifestFile):
     return (P.typesym('CGTextureResource'), P.sym('echo_arcade_screen_v1')) in mf.index, mf
 
 
-def original_manifest(P, ManifestFile):
-    """The stock manifest from a backup: this copy's, ORIGINAL, or any sibling copy's.
+def is_stock(data: bytes, P, ManifestFile):
+    """The stock tablet data: the known manifest, or one with the stock package count and none of
+    our resources (another mod's data has packages past the third)."""
+    if sha_bytes(data) == STOCK_SHA256:
+        return True
+    try:
+        has, mf = arcade_in(data, P, ManifestFile)
+    except Exception:
+        return False
+    return not has and mf.npkg == STOCK_NPKG
 
-    A candidate must parse and carry none of our resources; one whose hash an install recorded
-    as the original wins over one that merely looks stock (a game update could change the stock
-    manifest, so the hash is a preference, not a requirement)."""
-    known = {read_state(s).get('original_manifest_sha256') for s in state_files()} - {None}
+
+def other_mod_backups(game: Path):
+    """Where other tablet mods keep the stock manifest: Doom-on-EchoVR's tools write
+    manifests\\<id>.orig next to it, the trainer keeps bin\\win10\\*backup* folders, and a few
+    common names besides."""
+    manifests = paths(game)['manifest'].parent
+    found = [manifests / (MID + ext) for ext in ('.orig', '.bak', '.backup', '.original', '.before', '.stock')]
+    for pattern in (f'bin/win10/*backup*/**/{MID}*', f'bin/win10/*backup*/**/manifest.before', f'_data/**/{MID}.orig',
+                    f'_data/**/{MID}.bak', f'**/backups/*/{MID}', f'**/backups/*/manifest.before'):
+        try:
+            found += sorted(game.glob(pattern), reverse=True)
+        except OSError:
+            pass
+    return [f for f in found if f.is_file() and f.resolve() != paths(game)['manifest'].resolve()]
+
+
+def original_manifest(P, ManifestFile, game: Path = None):
+    """The stock manifest from a backup: this copy's, ORIGINAL, any sibling copy's, or one another
+    tablet mod kept in the game folder.
+
+    A candidate must parse, carry none of our resources and have the stock package count; the
+    known stock manifest (or one an install recorded as the original) wins over one that merely
+    looks stock (a game update could change it, so the hash is a preference, not a requirement)."""
+    known = {read_state(s).get('original_manifest_sha256') for s in state_files()} - {None} | {STOCK_SHA256}
     candidates = [ORIGINAL / MID]
     for c in copies():
         candidates += sorted((c / 'backups').glob(f'*/{MID}'), reverse=True) if (c / 'backups').exists() else []
+    if game:
+        candidates += other_mod_backups(game)
     best = None
     for f in candidates:
         if not f.exists():
@@ -153,12 +187,52 @@ def original_manifest(P, ManifestFile):
             has, mf = arcade_in(data, P, ManifestFile)
         except Exception:
             continue
-        if has:
+        if has or mf.npkg != STOCK_NPKG:
             continue
         if sha_bytes(data) in known:
             return f, data, mf
         best = best or (f, data, mf)
     return best
+
+
+def clean_slate(game: Path, dry: bool):
+    """Another tablet mod in the game (TabletDoom, TabletMusic, ...): its data is replaced by the
+    stock tablet data from the backup that mod (or one of ours) kept, and its packages go, so
+    Echo Arcade installs on a clean game. Stops if no stock copy can be found."""
+    p = paths(game)
+    P, ManifestFile = probe(game)
+    current = p['manifest'].read_bytes()
+    if is_stock(current, P, ManifestFile):
+        return False
+    try:
+        npkg = ManifestFile(current).npkg
+    except Exception:
+        npkg = -1
+    print(f'The tablet data is not Echo VR\'s own (another tablet mod: {npkg - STOCK_NPKG if npkg > 0 else "?"} package(s) past the stock 3).')
+    found = original_manifest(P, ManifestFile, game)
+    if not found:
+        raise SystemExit('No copy of the stock tablet data was found (no backup from that mod, none of ours). Either run that '
+                         'mod\'s own uninstall / restore first, or reinstall Echo VR, then run INSTALL again.')
+    source, original, _ = found
+    extra = sorted((f for f in p['packages'].glob(f'{MID}_*') if f.name[len(MID) + 1:].isdigit() and int(f.name[len(MID) + 1:]) >= STOCK_NPKG),
+                   key=lambda f: int(f.name[len(MID) + 1:]))
+    verified = sha_bytes(original) == STOCK_SHA256
+    print(f'Putting the stock tablet data back from {source}' + (' (verified)' if verified else '') +
+          (f' and removing {len(extra)} package(s) of that mod: ' + ', '.join(f.name for f in extra) if extra else ''))
+    if dry:
+        return True
+    backup = ROOT / 'backups' / time.strftime('%Y%m%d-%H%M%S')
+    backup.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(p['manifest'], backup / f'{MID}.other-mod')
+    for f in extra:
+        shutil.copy2(f, backup / f.name)
+        f.unlink()
+    p['manifest'].write_bytes(original)
+    if not (ORIGINAL / MID).exists():
+        ORIGINAL.mkdir(parents=True, exist_ok=True)
+        (ORIGINAL / MID).write_bytes(original)
+    print(f'Stock tablet data is back (what was there is under {backup}).')
+    return True
 
 
 def keep_original(manifest: Path, P, ManifestFile):
@@ -530,7 +604,7 @@ def uninstall(game: Path, dry: bool):
     known = {read_state(s).get('original_manifest_sha256') for s in state_files()} - {None}
     plan, source = [], None
     if has_arcade:
-        found = original_manifest(P, ManifestFile)
+        found = original_manifest(P, ManifestFile, game)
         if not found:
             raise SystemExit('The tablet data carries Echo Arcade, but no backup of the original manifest was found in\n'
                              f'{ROOT / "backups"} or any sibling copy. Reinstalling Echo VR restores it.')
@@ -610,6 +684,7 @@ def setup(game: Path, dry: bool):
     if installed:
         print('An earlier Echo Arcade install is in the game; removing it first.')
         uninstall(game, dry)
+    clean_slate(game, dry)  # another tablet mod's data: back to stock first
     if dry:
         print('Would install Echo Arcade from', ROOT)
         return
