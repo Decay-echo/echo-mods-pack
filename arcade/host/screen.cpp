@@ -8,6 +8,7 @@
 #include <winrt/Windows.Foundation.h>
 #include <winrt/Windows.Foundation.Collections.h>
 #include <winrt/Windows.Media.Control.h>
+#include <winrt/Windows.Storage.Streams.h>
 #include <cwctype>
 
 using namespace winrt::Windows::Media::Control;
@@ -98,7 +99,7 @@ std::wstring youTubeWindowTitle(HWND window) {
     return t == L"YouTube" ? std::wstring() : t;
 }
 
-MediaInfo mediaNowPlaying(std::wstring& app) {
+MediaInfo mediaNowPlaying(std::wstring& app, bool withArt) {
     MediaInfo info;
     app.clear();
     try {
@@ -115,6 +116,21 @@ MediaInfo mediaNowPlaying(std::wstring& app) {
         info.artist = props.Artist();
         info.playing = s.GetPlaybackInfo().PlaybackStatus() == GlobalSystemMediaTransportControlsSessionPlaybackStatus::Playing;
         info.valid = true;
+        if (withArt) {
+            try {
+                auto thumb = props.Thumbnail();
+                if (thumb) {
+                    auto stream = thumb.OpenReadAsync().get();
+                    uint32_t size = uint32_t(stream.Size());
+                    if (size && size < (8u << 20)) {
+                        winrt::Windows::Storage::Streams::DataReader reader(stream.GetInputStreamAt(0));
+                        reader.LoadAsync(size).get();
+                        info.art.resize(size);
+                        reader.ReadBytes(info.art);
+                    }
+                }
+            } catch (...) { info.art.clear(); }
+        }
     } catch (...) {}
     return info;
 }

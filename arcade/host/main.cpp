@@ -8,6 +8,8 @@
 #include "mod_settings.h"
 #include "touchpad.h"
 #include <winrt/base.h>
+#include <winrt/Windows.Data.Json.h>
+#include <ctime>
 #include <algorithm>
 #include <functional>
 #include <future>
@@ -81,6 +83,7 @@ const Rect SPLIT_STOP{12, 6, 180, 52}, SPLIT_MINE{192, 6, 416, 52};   // SPLIT S
 // The MEDIA page: now playing, then play / skip, then volume.
 const Rect MEDIA_PREV{40, 230, 320, 330}, MEDIA_PLAY{372, 230, 652, 330}, MEDIA_NEXT{704, 230, 984, 330};
 const Rect MEDIA_VOLDOWN{40, 360, 320, 460}, MEDIA_MUTE{372, 360, 652, 460}, MEDIA_VOLUP{704, 360, 984, 460};
+const Rect MEDIA_LISTEN{704, 474, 984, 530};  // listening mode: the album art alone
 #define canvas_ (*target_)  // the canvas being drawn: the tablet screen, or its 2x copy for the poster
 
 struct Entry {
@@ -473,9 +476,13 @@ private:
     void openYouTube() {
         if (GetFileAttributesW(config_.ytdlp.c_str()) == INVALID_FILE_ATTRIBUTES) { openScreen(); return; }
         Screen s{L"YOUTUBE"};
-        s.entries.push_back({L"HOME", exists(youTubeCookies()) ? L"Your recommendations (signed in through youtube_cookies.txt)"
-                                                                : L"Videos for the topics in youtube_home.txt (export cookies for your own feed)",
-                             [this] { openYouTubeHome(); }});
+        if (ytSignedIn()) {
+            s.entries.push_back({L"HOME", L"Your YouTube feed (signed in)", [this] { openYouTubeHome(); }});
+        } else {
+            s.entries.push_back({L"SIGN IN TO YOUTUBE", L"A code appears here; you enter it on your phone (google.com/device). Your feed after that", [this] { ytSignInStart(); }});
+            s.entries.push_back({L"CONTINUE AS GUEST", exists(youTubeCookies()) ? L"HOME from youtube_cookies.txt" : L"HOME from the topics in youtube_home.txt",
+                                 [this] { openYouTubeHome(); }});
+        }
         s.entries.push_back({L"SEARCH YOUTUBE", L"Type with the on-screen keyboard", [this] { mode_ = Mode::Keyboard; resetInput(); }});
         for (auto& link : loadYouTubeLinks(config_.youtubeLinks)) {
             if (link.playlist) s.entries.push_back({L"\x25B8  " + link.name, L"Playlist / mix - tap to see the videos", [this, link] { openYouTubeList(link); }});
@@ -483,6 +490,7 @@ private:
         }
         s.entries.push_back({L"YOUTUBE ON THIS PC", L"The YouTube page open in your browser, with touch controls", [this] { openScreen(); }});
         s.entries.push_back({L"Update yt-dlp", L"Tap this if videos stop playing (YouTube changes often)", [this] { updateYtdlp(); }});
+        if (ytSignedIn()) s.entries.push_back({L"Sign out of YouTube", L"Forgets the sign-in on this PC (HOME goes back to guest)", [this] { ytSignOut(); }});
         std::wstring file = config_.youtubeLinks;  // shown as its folder and name, e.g. apps\youtube.txt
         size_t cut = file.find_last_of(L"\\/");
         if (cut != std::wstring::npos && cut > 0) cut = file.find_last_of(L"\\/", cut - 1);
@@ -509,6 +517,20 @@ private:
         }
         if (topics.empty()) topics = {L"music", L"gaming", L"echo vr"};
         bool signedIn = exists(cookies);
+        if (ytSignedIn()) {
+            std::wstring dump = localAppData() + L"\\EchoArcade\\youtube_feed.json";
+            async([this, dump] {
+                Screen s{L"YOUTUBE HOME"};
+                std::wstring error, access = ytAccessToken(error);
+                std::vector<YtVideo> found;
+                if (access.empty()) s.entries.push_back({L"Could not sign in", error, nullptr});
+                else if (ytFeedSignedIn(access, found, error, dump))
+                    for (auto& v : found) s.entries.push_back({v.title, v.info, [this, v] { playYouTube({v.url}, 0, v.title); }, v.thumb});
+                else s.entries.push_back({L"Could not read your feed", error, nullptr});
+                return std::function<void()>([this, s] { push(s); });
+            }, L"Loading your YouTube feed");
+            return;
+        }
         async([this, ytdlp, cookies, topics, signedIn] {
             Screen s{L"YOUTUBE HOME"};
             std::wstring error;
@@ -528,6 +550,94 @@ private:
             if (s.entries.empty()) s.entries.push_back({L"Nothing found", error, nullptr});
             return std::function<void()>([this, s] { push(s); });
         }, L"Loading YouTube home");
+    }
+    // ---- signing in to YouTube without a browser: Google's device code (the TV way). The
+    // sign-in lives in apps\youtube_login.json (a refresh token; the access token is renewed).
+    std::wstring ytLoginPath() const { return youTubeFolder() + L"\\youtube_login.json"; }
+    bool ytSignedIn() const { return exists(ytLoginPath()); }
+    void ytSignOut() {
+        DeleteFileW(ytLoginPath().c_str());
+        message_ = L"Signed out of YouTube on this PC.";
+        toLauncher();
+        openYouTube();
+    }
+    static std::wstring jsonEscape(const std::wstring& s) {
+        std::wstring out;
+        for (wchar_t c : s) { if (c == L'"' || c == L'\\') out += L'\\'; out += c; }
+        return out;
+    }
+    void ytSaveLogin(const std::wstring& refresh, const std::wstring& access, int expiresIn) {
+        std::wstring json = L"{\"refresh_token\":\"" + jsonEscape(refresh) + L"\",\"access_token\":\"" + jsonEscape(access) + L"\",\"expires\":" +
+                            std::to_wstring(uint64_t(time(nullptr)) + uint64_t(std::max(0, expiresIn))) + L"}";
+        std::string bytes = narrowUtf8(json);
+        FILE* f = nullptr;
+        if (_wfopen_s(&f, ytLoginPath().c_str(), L"wb") == 0 && f) { fwrite(bytes.data(), 1, bytes.size(), f); fclose(f); }
+    }
+    // A usable access token (renewed with the refresh token when it ran out); "" with the reason.
+    std::wstring ytAccessToken(std::wstring& error) {
+        std::string text;
+        if (!readFile(ytLoginPath(), text)) { error = L"not signed in"; return L""; }
+        std::wstring refresh, access;
+        uint64_t expires = 0;
+        try {
+            auto o = winrt::Windows::Data::Json::JsonObject::Parse(widenUtf8(text));
+            refresh = o.GetNamedString(L"refresh_token", L"");
+            access = o.GetNamedString(L"access_token", L"");
+            expires = uint64_t(o.GetNamedNumber(L"expires", 0));
+        } catch (...) { error = L"the sign-in file is unreadable (sign in again)"; return L""; }
+        if (!access.empty() && expires > uint64_t(time(nullptr)) + 120) return access;
+        int expiresIn = 0;
+        if (!ytRefreshToken(refresh, access, expiresIn, error)) return L"";
+        ytSaveLogin(refresh, access, expiresIn);
+        return access;
+    }
+    void ytSignInStart() {
+        async([this] {
+            std::wstring device, code, url, error;
+            int interval = 5, expires = 1800;
+            bool ok = ytDeviceCode(device, code, url, interval, expires, error);
+            return std::function<void()>([this, ok, device, code, url, interval, expires, error] {
+                if (!ok) { message_ = L"Could not start the sign-in: " + error; return; }
+                Screen s{L"SIGN IN TO YOUTUBE"};
+                std::wstring site = url.rfind(L"https://", 0) == 0 ? url.substr(8) : url;
+                s.entries.push_back({L"1.  On your phone (or any device), open:   " + site, L"Sign in to Google there if it asks", nullptr});
+                s.entries.push_back({L"2.  Enter this code:   " + code, L"Letters and digits, dashes and all", nullptr});
+                s.entries.push_back({L"Waiting for you...", L"This page notices by itself once you are done (the code is good for " + std::to_wstring(expires / 60) + L" minutes)", nullptr});
+                push(s);
+                hostLog("youtube: sign-in started (code %ls at %ls)", code.c_str(), url.c_str());
+                ytPollSerial_++;
+                uint64_t serial = ytPollSerial_;
+                spawn([this, device, interval, expires, serial] {
+                    int wait = interval;
+                    uint64_t until = GetTickCount64() + uint64_t(expires) * 1000;
+                    while (GetTickCount64() < until && serial == ytPollSerial_) {
+                        Sleep(DWORD(wait * 1000));
+                        if (serial != ytPollSerial_) return;
+                        std::wstring refresh, access, err;
+                        int expiresIn = 0;
+                        int r = ytDevicePoll(device, refresh, access, expiresIn, err);
+                        if (r == 2) { wait += 5; continue; }
+                        if (r == 0) continue;
+                        std::lock_guard<std::mutex> lock(pendingLock_);
+                        pending_.push_back([this, r, refresh, access, expiresIn, err, serial] {
+                            if (serial != ytPollSerial_) return;
+                            if (r == 1) {
+                                ytSaveLogin(refresh, access, expiresIn);
+                                hostLog("youtube: signed in");
+                                message_ = L"Signed in to YouTube. HOME is your own feed now.";
+                                toLauncher();
+                                openYouTube();
+                            } else {
+                                hostLog("youtube: sign-in failed: %ls", err.c_str());
+                                for (auto& sc : screens_)
+                                    if (sc.title == L"SIGN IN TO YOUTUBE" && sc.entries.size() >= 3) { sc.entries[2].label = L"Not signed in: " + err; sc.entries[2].sub = L"BACK, then SIGN IN TO YOUTUBE again for a new code"; }
+                            }
+                        });
+                        return;
+                    }
+                });
+            });
+        }, L"Asking Google for a code");
     }
     void openYouTubeList(const YtLink& link) {
         std::wstring ytdlp = config_.ytdlp;
@@ -2012,17 +2122,34 @@ private:
         if (mode_ != Mode::Media || mediaPageBusy_ || now - lastMediaPage_ < 1000) return;
         lastMediaPage_ = now;
         mediaPageBusy_ = true;
-        spawn([this] {
+        std::wstring artKey = mediaArtKey_;
+        spawn([this, artKey] {
             std::wstring app;
-            MediaInfo info = mediaNowPlaying(app);
+            MediaInfo peek = mediaNowPlaying(app, false);
+            std::wstring key = peek.valid ? peek.title + L"|" + peek.artist + L"|" + app : L"";
+            std::shared_ptr<const SharePicture> art;
+            bool newArt = key != artKey;
+            if (newArt && peek.valid) {  // the album art, once per track
+                MediaInfo withArt = mediaNowPlaying(app, true);
+                if (!withArt.art.empty()) art = decodeImage(withArt.art.data(), withArt.art.size());
+            }
             float volume = masterVolume();
             bool muted = masterMuted();
             std::lock_guard<std::mutex> lock(pendingLock_);
-            pending_.push_back([this, info, app, volume, muted] { mediaNow_ = info; mediaApp_ = app; mediaVolume_ = volume; mediaMuted_ = muted; mediaPageBusy_ = false; });
+            pending_.push_back([this, peek, app, volume, muted, key, newArt, art] {
+                mediaNow_ = peek; mediaApp_ = app; mediaVolume_ = volume; mediaMuted_ = muted; mediaPageBusy_ = false;
+                if (newArt) { mediaArtKey_ = key; mediaArt_ = (art && art->w) ? art : nullptr; }
+            });
         });
     }
     void mediaTouch(const Touch& t) {
+        if (mediaListen_) {  // listening mode: any tap brings the controls back
+            if (t.down && !t.move && landing_) { landing_ = false; mediaListen_ = false; }
+            if (!t.down) pressed_ = -1;
+            return;
+        }
         if (tapped(t, 100, BACK_BUTTON)) { toLauncher(); return; }
+        if (tapped(t, 906, MEDIA_LISTEN)) { mediaListen_ = true; return; }
         MediaCommand command;
         bool control = false;
         if (tapped(t, 900, MEDIA_PREV)) { command = MediaCommand::Previous; control = true; }
@@ -2039,6 +2166,20 @@ private:
         });
     }
     void drawMedia() {
+        if (mediaListen_) {  // listening mode: the album art, the track, nothing else
+            canvas_.clear(rgb(6, 6, 10));
+            if (mediaArt_) canvas_.blit(mediaArt_->bgra.data(), mediaArt_->w, mediaArt_->h, mediaArt_->w * 4, {0, 0, SCREEN_W, SCREEN_H - 90});
+            else canvas_.text({0, 150, SCREEN_W, 330}, L"\x266B", 150, rgb(60, 70, 100));
+            canvas_.fill({0, SCREEN_H - 90, SCREEN_W, SCREEN_H}, rgb(10, 10, 16));
+            if (mediaNow_.valid) {
+                canvas_.text({30, SCREEN_H - 86, SCREEN_W - 30, SCREEN_H - 46}, mediaNow_.title.empty() ? L"(no title)" : mediaNow_.title, 28, rgb(245, 245, 250), true, 0);
+                canvas_.text({30, SCREEN_H - 46, SCREEN_W - 30, SCREEN_H - 12}, mediaNow_.artist + (mediaNow_.playing ? L"" : L"   (paused)"), 21, rgb(170, 180, 200), false, 0);
+            } else {
+                canvas_.text({30, SCREEN_H - 70, SCREEN_W - 30, SCREEN_H - 30}, L"Nothing is playing", 24, rgb(170, 180, 200), false, 0);
+            }
+            canvas_.text({SCREEN_W - 260, SCREEN_H - 40, SCREEN_W - 14, SCREEN_H - 10}, L"tap for the controls", 16, rgb(100, 110, 130), false, 2);
+            return;
+        }
         canvas_.clear(rgb(14, 16, 24));
         header(L"MEDIA", true);
         if (mediaNow_.valid) {
@@ -2056,7 +2197,8 @@ private:
         button(MEDIA_MUTE, mediaMuted_ ? L"UNMUTE" : L"MUTE", pressed_ == 904, mediaMuted_ ? rgb(150, 50, 50) : rgb(50, 58, 84), 26);
         button(MEDIA_VOLUP, L"VOL +", pressed_ == 905, rgb(50, 58, 84), 26);
         std::wstring vol = mediaVolume_ < 0 ? L"Volume: ?" : L"Volume " + std::to_wstring(int(mediaVolume_ * 100 + .5f)) + L"%" + (mediaMuted_ ? L"  (muted)" : L"");
-        canvas_.text({0, 480, SCREEN_W, 520}, vol, 24, rgb(90, 200, 255));
+        canvas_.text({40, 476, 640, 516}, vol, 24, rgb(90, 200, 255), true, 0);
+        button(MEDIA_LISTEN, L"LISTENING MODE", pressed_ == 906, rgb(60, 50, 110), 20);
         messageBar();
     }
 
@@ -2549,7 +2691,10 @@ private:
     MediaInfo mediaNow_;                // the MEDIA page
     std::wstring mediaApp_;
     float mediaVolume_ = -1;
-    bool mediaMuted_ = false, mediaPageBusy_ = false;
+    bool mediaMuted_ = false, mediaPageBusy_ = false, mediaListen_ = false;
+    std::shared_ptr<const SharePicture> mediaArt_;  // the album art of the current track
+    std::wstring mediaArtKey_;
+    uint64_t ytPollSerial_ = 0;         // the sign-in poll that is current (an older one gives up)
     uint64_t lastMediaPage_ = 0;
     Plex plex_;
     std::vector<AppInfo> apps_;

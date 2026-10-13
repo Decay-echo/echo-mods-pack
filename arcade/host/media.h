@@ -41,6 +41,15 @@ std::vector<YtLink> loadYouTubeLinks(const std::wstring& file);
 bool ytSearch(const std::wstring& ytdlp, const std::wstring& query, std::vector<YtVideo>& out, std::wstring& error, int count = 20);
 // The signed-in home feed (recommendations), with the cookies file an exported cookies.txt gives.
 bool ytFeed(const std::wstring& ytdlp, const std::wstring& cookies, std::vector<YtVideo>& out, std::wstring& error);
+// Signing in without a browser: Google's "device code" (the TV way). ytDeviceCode asks for one
+// (the user enters userCode at url on a phone); ytDevicePoll asks every `interval` seconds
+// whether they did (0 waiting, 1 signed in, 2 slow down, -1 failed); ytRefreshToken trades the
+// refresh token for a fresh access token; ytFeedSignedIn fetches the home feed with it
+// (InnerTube, the TV client); the raw answer is written to dumpPath when nothing was found.
+bool ytDeviceCode(std::wstring& deviceCode, std::wstring& userCode, std::wstring& url, int& interval, int& expires, std::wstring& error);
+int ytDevicePoll(const std::wstring& deviceCode, std::wstring& refresh, std::wstring& access, int& expiresIn, std::wstring& error);
+bool ytRefreshToken(const std::wstring& refresh, std::wstring& access, int& expiresIn, std::wstring& error);
+bool ytFeedSignedIn(const std::wstring& access, std::vector<YtVideo>& out, std::wstring& error, const std::wstring& dumpPath);
 // YouTube needs a JavaScript runtime in yt-dlp now: Deno's path (empty = none, searches may fail).
 void ytSetDeno(const std::wstring& deno);
 std::wstring ytRuntimeArgs();  // the yt-dlp options for it ("" without Deno)
@@ -57,6 +66,7 @@ struct MediaInfo {
     bool valid = false, playing = false, canSeek = false;
     std::wstring title, artist;
     double position = -1, duration = -1;        // seconds; -1 = unknown
+    std::vector<uint8_t> art;                   // the album art / thumbnail (a JPEG or PNG), when asked for
 };
 enum class MediaCommand { PlayPause, Next, Previous, Seek };
 // Both block briefly; ArcadeHost calls them on worker threads. `title`: the window's video name,
@@ -64,7 +74,7 @@ enum class MediaCommand { PlayPause, Next, Previous, Seek };
 MediaInfo mediaInfo(const std::wstring& title);
 bool mediaCommand(MediaCommand command, const std::wstring& title, double seconds = 0);  // Seek: to `seconds`
 // The MEDIA page: whatever Windows counts as the current media session (Spotify, a browser, mpv...).
-MediaInfo mediaNowPlaying(std::wstring& app);
+MediaInfo mediaNowPlaying(std::wstring& app, bool withArt = false);
 bool mediaControl(MediaCommand command);
 // Presses YouTube's own "Skip" button in the browser window once an ad offers it, through UI
 // Automation (no mouse, no focus change). Returns true if it skipped one. Blocks briefly; call it on

@@ -38,6 +38,9 @@ struct Participant {  // a connected viewer, as the split screen sees it
     ShareState state = ShareState::Looking;
 };
 
+// A JPEG/PNG/GIF/BMP in memory as a picture (w = 0 when it cannot be read).
+std::shared_ptr<SharePicture> decodeImage(const uint8_t* data, size_t size);
+
 std::wstring shareCodeText(uint32_t ip, uint16_t port, uint16_t secret);  // ip in host order
 bool shareCodeParse(const std::wstring& text, uint32_t& ip, uint16_t& port, uint16_t& secret);
 

@@ -12,6 +12,45 @@
 
 namespace {
 
+std::vector<uint8_t> request(const std::wstring& url, const wchar_t* method, const std::wstring& headers, const std::string& body, DWORD* statusOut) {
+    std::vector<uint8_t> out;
+    if (statusOut) *statusOut = 0;
+    URL_COMPONENTS parts{};
+    parts.dwStructSize = sizeof(parts);
+    wchar_t host[256], path[2048], extra[2048];
+    parts.lpszHostName = host; parts.dwHostNameLength = 256;
+    parts.lpszUrlPath = path; parts.dwUrlPathLength = 2048;
+    parts.lpszExtraInfo = extra; parts.dwExtraInfoLength = 2048;
+    if (!WinHttpCrackUrl(url.c_str(), 0, 0, &parts)) return out;
+    std::wstring target = std::wstring(path) + extra;
+    HINTERNET session = WinHttpOpen(L"EchoArcade", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    if (!session) return out;
+    WinHttpSetTimeouts(session, 8000, 8000, 8000, 15000);
+    HINTERNET connection = WinHttpConnect(session, host, parts.nPort, 0);
+    HINTERNET req = connection ? WinHttpOpenRequest(connection, method, target.c_str(), nullptr, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
+                                                    parts.nScheme == INTERNET_SCHEME_HTTPS ? WINHTTP_FLAG_SECURE : 0) : nullptr;
+    if (req && WinHttpSendRequest(req, headers.empty() ? WINHTTP_NO_ADDITIONAL_HEADERS : headers.c_str(), headers.empty() ? 0 : DWORD(-1),
+                                  body.empty() ? WINHTTP_NO_REQUEST_DATA : const_cast<char*>(body.data()), DWORD(body.size()), DWORD(body.size()), 0) &&
+        WinHttpReceiveResponse(req, nullptr)) {
+        DWORD status = 0, size = sizeof(status);
+        WinHttpQueryHeaders(req, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_HEADER_NAME_BY_INDEX, &status, &size, WINHTTP_NO_HEADER_INDEX);
+        if (statusOut) *statusOut = status;
+        DWORD available = 0;
+        while (WinHttpQueryDataAvailable(req, &available) && available) {
+            size_t at = out.size();
+            if (at + available > 8u << 20) { out.clear(); break; }
+            out.resize(at + available);
+            DWORD got = 0;
+            if (!WinHttpReadData(req, out.data() + at, available, &got)) { out.clear(); break; }
+            out.resize(at + got);
+        }
+    }
+    if (req) WinHttpCloseHandle(req);
+    if (connection) WinHttpCloseHandle(connection);
+    WinHttpCloseHandle(session);
+    return out;
+}
+
 // GET over HTTPS; at most 2 MB; empty on any failure.
 std::vector<uint8_t> httpGet(const std::wstring& url) {
     std::vector<uint8_t> out;
@@ -90,6 +129,9 @@ std::shared_ptr<Picture> decode(const std::vector<uint8_t>& bytes, int W, int H)
 }  // namespace
 
 std::vector<uint8_t> httpGetBytes(const std::wstring& url) { return httpGet(url); }
+std::vector<uint8_t> httpRequest(const std::wstring& url, const wchar_t* method, const std::wstring& headers, const std::string& body, DWORD* status) {
+    return request(url, method, headers, body, status);
+}
 
 Thumbs::Thumbs() {
     Gdiplus::GdiplusStartupInput input;

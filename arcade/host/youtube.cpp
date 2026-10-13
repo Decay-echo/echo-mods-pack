@@ -1,6 +1,8 @@
 // YouTube for the YOUTUBE tile: yt-dlp finds the videos (search, playlists, mixes) and mpv,
 // through its own yt-dlp hook, plays them. Nothing here talks to YouTube directly.
 #include "media.h"
+#include "thumbs.h"
+#include <set>
 #include <winrt/Windows.Foundation.Collections.h>
 #include <winrt/Windows.Data.Json.h>
 #include <cstdio>
@@ -221,4 +223,183 @@ std::wstring ytUpdate(const std::wstring& ytdlp) {
     std::wstring said = lastLine(so + "\n" + se);
     hostLog("youtube: yt-dlp -U exit %d: %ls", code, said.c_str());
     return said.empty() ? L"yt-dlp update finished" : said;
+}
+
+// ---------------------------------------------------------------- signing in (Google's device code)
+namespace {
+// YouTube's own TV client (the one TVs sign in with): the device code flow is open to it.
+const char* const CLIENT_ID = "861556708454-d6dlm3lh05idd8npek18k6be8ba3oc68.apps.googleusercontent.com";
+const char* const CLIENT_SECRET = "SboVhoG9s0rNafixCSGGKXAT";
+const wchar_t* const TV_VERSION = L"7.20250312.16.00";
+
+std::string narrow(const std::wstring& w) {
+    if (w.empty()) return {};
+    int n = WideCharToMultiByte(CP_UTF8, 0, w.data(), int(w.size()), nullptr, 0, nullptr, nullptr);
+    std::string s(size_t(n), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, w.data(), int(w.size()), s.data(), n, nullptr, nullptr);
+    return s;
+}
+std::wstring widen(const std::vector<uint8_t>& b) {
+    if (b.empty()) return {};
+    int n = MultiByteToWideChar(CP_UTF8, 0, reinterpret_cast<const char*>(b.data()), int(b.size()), nullptr, 0);
+    std::wstring w(size_t(n), L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, reinterpret_cast<const char*>(b.data()), int(b.size()), w.data(), n);
+    return w;
+}
+std::string urlEncode(const std::string& s) {
+    std::string out;
+    for (unsigned char c : s) {
+        if (isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~') out += char(c);
+        else { char b[4]; sprintf_s(b, "%%%02X", c); out += b; }
+    }
+    return out;
+}
+bool parseJson(const std::vector<uint8_t>& body, JsonObject& out) {
+    try { return !body.empty() && JsonObject::TryParse(widen(body), out); } catch (...) { return false; }
+}
+std::wstring str(const JsonObject& o, const wchar_t* key) {
+    try { return o.HasKey(key) && o.Lookup(key).ValueType() == JsonValueType::String ? std::wstring(o.GetNamedString(key)) : L""; } catch (...) { return L""; }
+}
+double num(const JsonObject& o, const wchar_t* key) {
+    try { return o.HasKey(key) && o.Lookup(key).ValueType() == JsonValueType::Number ? o.GetNamedNumber(key) : 0; } catch (...) { return 0; }
+}
+// A YouTube "text": {"simpleText": ...} or {"runs": [{"text": ...}, ...]} or a plain string.
+std::wstring ytText(const IJsonValue& v) {
+    try {
+        if (!v) return L"";
+        if (v.ValueType() == JsonValueType::String) return std::wstring(v.GetString());
+        if (v.ValueType() != JsonValueType::Object) return L"";
+        auto o = v.GetObject();
+        if (!str(o, L"simpleText").empty()) return str(o, L"simpleText");
+        if (o.HasKey(L"runs") && o.Lookup(L"runs").ValueType() == JsonValueType::Array) {
+            std::wstring t;
+            for (auto r : o.Lookup(L"runs").GetArray())
+                if (r.ValueType() == JsonValueType::Object) t += str(r.GetObject(), L"text");
+            return t;
+        }
+    } catch (...) {}
+    return L"";
+}
+IJsonValue field(const JsonObject& o, const wchar_t* key) {
+    try { return o.HasKey(key) ? o.Lookup(key) : nullptr; } catch (...) { return nullptr; }
+}
+// Every video in the answer, whatever renderer YouTube wrapped it in (web or TV shapes).
+void collectVideos(const IJsonValue& v, std::vector<YtVideo>& out, std::set<std::wstring>& seen, int depth = 0) {
+    if (!v || depth > 60) return;
+    try {
+        if (v.ValueType() == JsonValueType::Array) {
+            for (auto e : v.GetArray()) collectVideos(e, out, seen, depth + 1);
+            return;
+        }
+        if (v.ValueType() != JsonValueType::Object) return;
+        auto o = v.GetObject();
+        std::wstring id, title, info;
+        if (!str(o, L"videoId").empty() && o.HasKey(L"title")) {  // videoRenderer, compactVideoRenderer, gridVideoRenderer...
+            id = str(o, L"videoId");
+            title = ytText(field(o, L"title"));
+            std::wstring channel = ytText(field(o, L"ownerText"));
+            if (channel.empty()) channel = ytText(field(o, L"shortBylineText"));
+            if (channel.empty()) channel = ytText(field(o, L"longBylineText"));
+            std::wstring length = ytText(field(o, L"lengthText"));
+            info = channel + (channel.empty() || length.empty() ? L"" : L"  -  ") + length;
+        } else if (!str(o, L"contentId").empty() && str(o, L"contentType") == L"TILE_CONTENT_TYPE_VIDEO") {  // tileRenderer (TV)
+            id = str(o, L"contentId");
+            auto meta = field(o, L"metadata");
+            if (meta && meta.ValueType() == JsonValueType::Object) {
+                auto tm = field(meta.GetObject(), L"tileMetadataRenderer");
+                if (tm && tm.ValueType() == JsonValueType::Object) {
+                    auto t = tm.GetObject();
+                    title = ytText(field(t, L"title"));
+                    auto lines = field(t, L"lines");
+                    if (lines && lines.ValueType() == JsonValueType::Array) {
+                        for (auto line : lines.GetArray()) {
+                            if (line.ValueType() != JsonValueType::Object) continue;
+                            auto lr = field(line.GetObject(), L"lineRenderer");
+                            if (!lr || lr.ValueType() != JsonValueType::Object) continue;
+                            auto items = field(lr.GetObject(), L"items");
+                            if (!items || items.ValueType() != JsonValueType::Array) continue;
+                            std::wstring text;
+                            for (auto item : items.GetArray()) {
+                                if (item.ValueType() != JsonValueType::Object) continue;
+                                auto li = field(item.GetObject(), L"lineItemRenderer");
+                                if (li && li.ValueType() == JsonValueType::Object) text += ytText(field(li.GetObject(), L"text"));
+                            }
+                            if (!text.empty()) info += (info.empty() ? L"" : L"  -  ") + text;
+                        }
+                    }
+                }
+            }
+        }
+        if (!id.empty() && !title.empty() && seen.insert(id).second)
+            out.push_back({title, info, L"https://www.youtube.com/watch?v=" + id, L"https://i.ytimg.com/vi/" + id + L"/mqdefault.jpg"});
+        for (auto pair : o) collectVideos(pair.Value(), out, seen, depth + 1);
+    } catch (...) {}
+}
+}  // namespace
+
+bool ytDeviceCode(std::wstring& deviceCode, std::wstring& userCode, std::wstring& url, int& interval, int& expires, std::wstring& error) {
+    DWORD status = 0;
+    std::string body = std::string("client_id=") + CLIENT_ID + "&scope=" + urlEncode("https://www.googleapis.com/auth/youtube");
+    auto answer = httpRequest(L"https://oauth2.googleapis.com/device/code", L"POST", L"Content-Type: application/x-www-form-urlencoded\r\n", body, &status);
+    JsonObject o;
+    if (!parseJson(answer, o)) { error = L"Google did not answer (status " + std::to_wstring(status) + L")"; return false; }
+    if (!str(o, L"error").empty()) { error = L"Google: " + str(o, L"error_description").substr(0, 120); return false; }
+    deviceCode = str(o, L"device_code");
+    userCode = str(o, L"user_code");
+    url = str(o, L"verification_url");
+    interval = int(num(o, L"interval"));
+    expires = int(num(o, L"expires_in"));
+    if (interval < 1) interval = 5;
+    if (expires < 60) expires = 1800;
+    return !deviceCode.empty() && !userCode.empty();
+}
+
+int ytDevicePoll(const std::wstring& deviceCode, std::wstring& refresh, std::wstring& access, int& expiresIn, std::wstring& error) {
+    DWORD status = 0;
+    std::string body = std::string("client_id=") + CLIENT_ID + "&client_secret=" + CLIENT_SECRET + "&device_code=" + urlEncode(narrow(deviceCode)) +
+                       "&grant_type=" + urlEncode("urn:ietf:params:oauth:grant-type:device_code");
+    auto answer = httpRequest(L"https://oauth2.googleapis.com/token", L"POST", L"Content-Type: application/x-www-form-urlencoded\r\n", body, &status);
+    JsonObject o;
+    if (!parseJson(answer, o)) { error = L"no answer (status " + std::to_wstring(status) + L")"; return status == 0 ? 0 : -1; }
+    std::wstring err = str(o, L"error");
+    if (err == L"authorization_pending") return 0;
+    if (err == L"slow_down") return 2;
+    if (!err.empty()) { error = err == L"access_denied" ? L"You said no on the phone" : err == L"expired_token" ? L"The code expired" : L"Google: " + err; return -1; }
+    access = str(o, L"access_token");
+    refresh = str(o, L"refresh_token");
+    expiresIn = int(num(o, L"expires_in"));
+    return access.empty() ? -1 : 1;
+}
+
+bool ytRefreshToken(const std::wstring& refresh, std::wstring& access, int& expiresIn, std::wstring& error) {
+    DWORD status = 0;
+    std::string body = std::string("client_id=") + CLIENT_ID + "&client_secret=" + CLIENT_SECRET + "&refresh_token=" + urlEncode(narrow(refresh)) + "&grant_type=refresh_token";
+    auto answer = httpRequest(L"https://oauth2.googleapis.com/token", L"POST", L"Content-Type: application/x-www-form-urlencoded\r\n", body, &status);
+    JsonObject o;
+    if (!parseJson(answer, o)) { error = L"Google did not answer (status " + std::to_wstring(status) + L")"; return false; }
+    if (!str(o, L"error").empty()) { error = L"Google: " + str(o, L"error") + L" (sign in again)"; return false; }
+    access = str(o, L"access_token");
+    expiresIn = int(num(o, L"expires_in"));
+    return !access.empty();
+}
+
+bool ytFeedSignedIn(const std::wstring& access, std::vector<YtVideo>& out, std::wstring& error, const std::wstring& dumpPath) {
+    DWORD status = 0;
+    std::string body = "{\"context\":{\"client\":{\"clientName\":\"TVHTML5\",\"clientVersion\":\"" + narrow(TV_VERSION) +
+                       "\",\"hl\":\"en\",\"gl\":\"US\"}},\"browseId\":\"FEwhat_to_watch\"}";
+    std::wstring headers = L"Content-Type: application/json\r\nAuthorization: Bearer " + access + L"\r\nX-YouTube-Client-Name: 7\r\nX-YouTube-Client-Version: " +
+                           std::wstring(TV_VERSION) + L"\r\nUser-Agent: Mozilla/5.0 (ChromiumStylePlatform) Cobalt/Version\r\n";
+    auto answer = httpRequest(L"https://www.youtube.com/youtubei/v1/browse?prettyPrint=false", L"POST", headers, body, &status);
+    JsonObject o;
+    if (!parseJson(answer, o)) { error = L"YouTube did not answer (status " + std::to_wstring(status) + L")"; return false; }
+    std::set<std::wstring> seen;
+    collectVideos(o, out, seen);
+    hostLog("youtube: signed-in feed: status %lu, %zu videos (%zu bytes)", status, out.size(), answer.size());
+    if (out.empty()) {
+        FILE* f = nullptr;
+        if (!dumpPath.empty() && _wfopen_s(&f, dumpPath.c_str(), L"wb") == 0 && f) { fwrite(answer.data(), 1, answer.size(), f); fclose(f); }
+        error = status == 200 ? L"YouTube answered but no videos were found (the answer was saved for a look)" : L"YouTube refused (status " + std::to_wstring(status) + L")";
+        return false;
+    }
+    return true;
 }

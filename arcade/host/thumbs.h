@@ -16,6 +16,8 @@ struct Picture {
 
 // GET over HTTP(S), at most 2 MB; empty on any failure (share.cpp asks the public address with it).
 std::vector<uint8_t> httpGetBytes(const std::wstring& url);
+// Any request: the body comes back whatever the status (status in *status; 0 = no answer).
+std::vector<uint8_t> httpRequest(const std::wstring& url, const wchar_t* method, const std::wstring& headers, const std::string& body, DWORD* status);
 
 class Thumbs {
 public:

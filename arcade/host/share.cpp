@@ -311,6 +311,8 @@ bool unpackAudio(const uint8_t* data, size_t size, std::vector<int16_t>& interle
 
 }  // namespace
 
+std::shared_ptr<SharePicture> decodeImage(const uint8_t* data, size_t size) { return decodeJpeg(data, size); }
+
 // ---------------------------------------------------------------- codes, ADPCM (public)
 
 std::wstring shareCodeText(uint32_t ip, uint16_t port, uint16_t secret) {
