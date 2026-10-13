@@ -1,4 +1,5 @@
 #include "apps.h"
+#include "minecraft.h"
 #include <ws2tcpip.h>
 #include <objbase.h>
 #include <cstdio>
@@ -88,7 +89,50 @@ void writeRetroConfig(const Config& c, const std::wstring& path) {
 
 }  // namespace
 
-bool isRetro(AppId id) { return id == AppId::RetroArch || id == AppId::Doom || id == AppId::DuckHunt; }
+bool isRetro(AppId id) { return id == AppId::RetroArch || id == AppId::Doom || id == AppId::DuckHunt || id == AppId::OwnGame; }
+
+// On a thread of its own: the process's sound to the headset (Windows refuses until it has
+// started), then its volume to app_volume once it plays something.
+void routeAudioLater(DWORD pid, const AudioTarget& audio, float volume, const char* what) {
+    std::thread([pid, audio, volume, what] {
+        (void)CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+        bool routed = audio.id.empty();
+        for (int attempt = 0; attempt < 20 && !routed; attempt++) {
+            Sleep(attempt ? 250 : 50);
+            routed = routeProcessAudio(pid, audio);
+        }
+        if (!audio.id.empty())
+            hostLog(routed ? "audio: %s pid %lu -> %ls" : "audio: %s pid %lu: could not route (0x%08lx); it plays on the Windows default", what, pid,
+                    routed ? audio.name.c_str() : reinterpret_cast<const wchar_t*>(uintptr_t(lastAudioError)));
+        bool set = false;
+        for (int attempt = 0; attempt < 120 && !set; attempt++) {  // up to a minute for its first sound
+            Sleep(500);
+            set = setProcessVolume(pid, audio, volume);
+        }
+        hostLog(set ? "audio: %s pid %lu volume %.0f%%" : "audio: %s pid %lu: no audio session seen (volume left as is)", what, pid, volume * 100);
+        CoUninitialize();
+    }).detach();
+}
+
+std::vector<Launcher> minecraftLaunchers(const Config& c) {
+    std::vector<Launcher> out;
+    std::wstring official = minecraft::findLauncher(c.minecraft);
+    if (!official.empty()) out.push_back({L"Minecraft Launcher", official, L""});
+    wchar_t buf[MAX_PATH];
+    auto expand = [&](const wchar_t* s) { return ExpandEnvironmentStringsW(s, buf, MAX_PATH) ? std::wstring(buf) : std::wstring(); };
+    // CurseForge: the standalone app, else the Overwolf one (started by its extension id).
+    std::wstring curse = minecraft::fileExists(c.curseforge) ? c.curseforge : expand(L"%LOCALAPPDATA%\\Programs\\CurseForge Windows\\CurseForge.exe");
+    if (minecraft::fileExists(curse)) out.push_back({L"CurseForge", curse, L""});
+    else if (std::wstring ow = expand(L"%ProgramFiles(x86)%\\Overwolf\\OverwolfLauncher.exe");
+             minecraft::fileExists(ow) && minecraft::fileExists(expand(L"%LOCALAPPDATA%\\Overwolf\\Extensions\\cchhcaiapeikjbdbpfplgmpobbcdkdaphclbmkbj")))
+        out.push_back({L"CurseForge", ow, L"-launchapp cchhcaiapeikjbdbpfplgmpobbcdkdaphclbmkbj"});
+    std::wstring modrinth = minecraft::fileExists(c.modrinth) ? c.modrinth : expand(L"%LOCALAPPDATA%\\Modrinth App\\Modrinth App.exe");
+    if (!minecraft::fileExists(modrinth)) modrinth = expand(L"%ProgramFiles%\\Modrinth App\\Modrinth App.exe");
+    if (minecraft::fileExists(modrinth)) out.push_back({L"Modrinth App", modrinth, L""});
+    std::wstring prism = minecraft::fileExists(c.prism) ? c.prism : expand(L"%LOCALAPPDATA%\\Programs\\PrismLauncher\\prismlauncher.exe");
+    if (minecraft::fileExists(prism)) out.push_back({L"Prism Launcher", prism, L""});
+    return out;
+}
 bool isVideo(AppId id) { return id == AppId::Movies || id == AppId::Plex || id == AppId::YouTube; }
 int writePlaylists(const Config& c);  // playlists.cpp
 
@@ -103,25 +147,45 @@ static std::wstring redact(std::wstring s) {
 }
 
 std::vector<AppInfo> listApps(const Config& c) {
-    std::vector<AppInfo> apps;
+    // Top row: games. Your own games first (up to three, playlists.cpp), then the stock ones
+    // that still fit: Balatro, Duck Hunt, DOOM. Bottom row: RetroArch itself, Movies, YouTube.
+    std::vector<AppInfo> games, apps;
+    std::vector<OwnGame> own = exists(c.retroarch) ? ownGames(c, 3) : std::vector<OwnGame>{};
+    static const uint32_t colours[3] = {rgb(222, 64, 64), rgb(64, 132, 230), rgb(200, 120, 40)};
+    for (size_t i = 0; i < own.size() && i < 3; i++) {
+        AppInfo a{AppId::OwnGame, own[i].title, own[i].system + L" via RetroArch",
+                  exists(own[i].core) ? L"" : L"Its RetroArch core is missing - rerun the installer", colours[i]};
+        a.core = own[i].core;
+        a.rom = own[i].rom;
+        games.push_back(a);
+    }
     std::wstring balatroMissing = !exists(c.love) ? L"LOVE runtime missing - rerun the installer" :
                                   !exists(c.balatroSteam + L"\\main.lua") ? L"Install Balatro on Steam, then rerun prepare" : L"";
-    apps.push_back({AppId::BalatroSteam, L"BALATRO", L"Steam original", balatroMissing, rgb(222, 64, 64)});
     std::wstring duckMissing = !exists(c.retroarch) ? L"RetroArch missing" :
                                !exists(c.duckHuntCore) ? L"Nestopia core missing" :
                                !exists(c.duckHuntRom) ? L"Put Duck Hunt (World).nes in roms\\nes" : L"";
-    apps.push_back({AppId::DuckHunt, L"DUCK HUNT", L"NES Zapper light gun", duckMissing, rgb(64, 132, 230)});
-    apps.push_back({AppId::RetroArch, L"RETROARCH", L"All cores - full menu",
-                    exists(c.retroarch) ? L"" : L"RetroArch missing - rerun the installer", rgb(150, 90, 220)});
     std::wstring doomMissing = !exists(c.retroarch) ? L"RetroArch missing" :
                                !exists(c.doomCore) ? L"prboom core missing" : !exists(c.doomWad) ? L"doom1.wad missing" : L"";
-    apps.push_back({AppId::Doom, L"DOOM", L"Shareware via RetroArch", doomMissing, rgb(200, 120, 40)});
-    std::wstring mpvMissing = exists(c.mpv) ? L"" : L"mpv missing - rerun setup_apps.py";
-    apps.push_back({AppId::Movies, L"MOVIES", L"Your video folders", mpvMissing, rgb(40, 170, 150)});
+    const AppInfo stock[3] = {{AppId::BalatroSteam, L"BALATRO", L"Steam original", balatroMissing, colours[0]},
+                              {AppId::DuckHunt, L"DUCK HUNT", L"NES Zapper light gun", duckMissing, colours[1]},
+                              {AppId::Doom, L"DOOM", L"Shareware via RetroArch", doomMissing, colours[2]}};
+    for (int i = 2; i >= 0 && games.size() < 3; i--) games.insert(games.begin() + int(own.size()), stock[i]);  // DOOM stays longest
+    apps.push_back({AppId::RetroArch, L"RETROARCH", L"All cores - full menu",
+                    exists(c.retroarch) ? L"" : L"RetroArch missing - rerun the installer", rgb(150, 90, 220)});
+    if (c.moviesTile) {
+        std::wstring mpvMissing = exists(c.mpv) ? L"" : L"mpv missing - rerun setup_apps.py";
+        apps.push_back({AppId::Movies, L"MOVIES", L"Your video folders", mpvMissing, rgb(40, 170, 150)});
+    } else {
+        std::vector<Launcher> launchers = minecraftLaunchers(c);
+        std::wstring sub = launchers.empty() ? L"Java Edition" : launchers.size() == 1 ? launchers[0].name : L"Java: " + std::to_wstring(launchers.size()) + L" launchers";
+        apps.push_back({AppId::Minecraft, L"MINECRAFT", sub + L" - FREEZE to play",
+                        launchers.empty() ? L"No Minecraft launcher found (Java Edition)" : L"", rgb(92, 160, 64)});
+    }
     // Shows the YouTube page open in your browser; with yt-dlp (setup_apps.py) also search and saved links.
     apps.push_back({AppId::YouTube, L"YOUTUBE", exists(c.ytdlp) ? L"Browser YouTube + search" : L"Your browser's YouTube",
                     L"", rgb(255, 48, 64)});
-    return apps;
+    games.insert(games.end(), apps.begin(), apps.end());
+    return games;
 }
 
 Session::Session(const Config& config) : config_(config) {
@@ -141,9 +205,11 @@ Rect Session::contentRect() const {
 }
 
 bool Session::launch(AppId id, const std::wstring& target, double startSeconds,
-                     const std::vector<std::wstring>& playlist, int playlistStart) {
+                     const std::vector<std::wstring>& playlist, int playlistStart, const std::wstring& extra) {
     kill();
     id_ = id;
+    minecraftAlive_ = false;
+    minecraftGame_ = nullptr;
     std::wstring exe, args, cwd;
     AudioTarget audio = findAudioDevice(config_.audioDevice);
     auto setEnv = [](const wchar_t* k, const std::wstring& v) { SetEnvironmentVariableW(k, v.empty() ? nullptr : v.c_str()); };
@@ -157,6 +223,19 @@ bool Session::launch(AppId id, const std::wstring& target, double startSeconds,
         setEnv(L"ECHO_ARCADE_STEAM", L"1");
         setEnv(L"ECHO_ARCADE_WIDTH", std::to_wstring(SCREEN_W));
         setEnv(L"ECHO_ARCADE_HEIGHT", std::to_wstring(SCREEN_H));
+    } else if (id == AppId::Minecraft) {
+        minecraft::prepareOptions();
+        if (target.rfind(L"shell:", 0) == 0) {  // a Store app: explorer starts it and goes away
+            wchar_t sys[MAX_PATH];
+            GetSystemDirectoryW(sys, MAX_PATH);
+            exe = std::wstring(sys) + L"\\explorer.exe";
+            args = target;
+        } else {
+            exe = target;
+            cwd = folderOf(exe);
+            args = extra;
+        }
+        minecraftAlive_ = true;  // until its windows are gone
     } else if (isVideo(id)) {
         exe = config_.mpv;
         cwd = folderOf(exe);
@@ -185,6 +264,7 @@ bool Session::launch(AppId id, const std::wstring& target, double startSeconds,
         if (id == AppId::Doom) args += L" -L \"" + config_.doomCore + L"\" \"" + config_.doomWad + L"\"";
         // Its Nestopia remap (config\remaps\Nestopia\Duck Hunt (World).rmp) plugs the Zapper into port 2.
         else if (id == AppId::DuckHunt) args += L" -L \"" + config_.duckHuntCore + L"\" \"" + config_.duckHuntRom + L"\"";
+        else if (id == AppId::OwnGame) args += L" -L \"" + extra + L"\" \"" + target + L"\"";
         else hostLog("playlists: %d game(s) found in %ls", writePlaylists(config_), config_.roms.c_str());
     }
     std::wstring cmd = L"\"" + exe + L"\" " + args;
@@ -200,20 +280,7 @@ bool Session::launch(AppId id, const std::wstring& target, double startSeconds,
     // has started, and moves any sound it already plays when the route is set.
     ResumeThread(pi.hThread);
     if (audio.id.empty()) hostLog("audio: no device matching \"%ls\"; using the Windows default", config_.audioDevice.c_str());
-    else {
-        DWORD pid = pi.dwProcessId;
-        std::thread([pid, audio] {
-            (void)CoInitializeEx(nullptr, COINIT_MULTITHREADED);
-            bool ok = false;
-            for (int attempt = 0; attempt < 20 && !ok; attempt++) {
-                Sleep(attempt ? 250 : 50);
-                ok = routeProcessAudio(pid, audio);
-            }
-            if (ok) hostLog("audio: pid %lu -> %ls", pid, audio.name.c_str());
-            else hostLog("audio: could not route pid %lu (0x%08lx); it plays on the Windows default", pid, lastAudioError);
-            CoUninitialize();
-        }).detach();
-    }
+    routeAudioLater(pi.dwProcessId, audio, config_.appVolume, "app");
     CloseHandle(pi.hThread);
     process_ = pi.hProcess;
     pid_ = pi.dwProcessId;
@@ -225,7 +292,11 @@ bool Session::launch(AppId id, const std::wstring& target, double startSeconds,
     return true;
 }
 
-bool Session::alive() const { return process_ && WaitForSingleObject(process_, 0) == WAIT_TIMEOUT; }
+bool Session::alive() const {
+    if (!process_) return false;
+    if (WaitForSingleObject(process_, 0) == WAIT_TIMEOUT) return true;
+    return id_ == AppId::Minecraft && minecraftAlive_;  // the launcher may close while the game runs on
+}
 
 void Session::poll() {
     if (!process_) return;
@@ -240,6 +311,40 @@ void Session::poll() {
     if (window_ && !IsWindow(window_)) { window_ = nullptr; capture_.stop(); lastWindow_ = GetTickCount64(); }
     Rect r = contentRect();
     int x = config_.windowMode == L"offscreen" ? -8000 : 0;
+    if (id_ == AppId::Minecraft) {
+        // The launcher first, then the game's own window once it is up (another process). Alive
+        // while either is: the launcher may close itself once the game runs.
+        uint64_t now = GetTickCount64();
+        if (now - lastLook_ > 500) {
+            lastLook_ = now;
+            minecraft::Windows w = minecraft::find(pid_);
+            bool processUp = WaitForSingleObject(process_, 0) == WAIT_TIMEOUT;
+            minecraftAlive_ = processUp || w.game || w.launcher || now - started_ < 20000;
+            HWND want = w.game ? w.game : w.launcher;
+            if (want && want != window_) {
+                if (window_) capture_.stop();
+                window_ = want;
+                lastPlace_ = now;
+                if (w.game && w.game != minecraftGame_) {
+                    minecraftGame_ = w.game;
+                    DWORD gamePid = 0;
+                    GetWindowThreadProcessId(w.game, &gamePid);
+                    hostLog("minecraft: game window %p (pid %lu)", static_cast<void*>(w.game), gamePid);
+                    if (gamePid) routeAudioLater(gamePid, findAudioDevice(config_.audioDevice), config_.appVolume, "minecraft");
+                }
+                HWND hwnd = window_;
+                std::thread([hwnd, x, w = r.w(), h = r.h()] {
+                    LONG style = GetWindowLongW(hwnd, GWL_STYLE);
+                    SetWindowLongW(hwnd, GWL_STYLE, (style & ~(WS_CAPTION | WS_THICKFRAME | WS_SYSMENU | WS_MAXIMIZEBOX | WS_MINIMIZEBOX)) | WS_POPUP);
+                    SetWindowPos(hwnd, HWND_BOTTOM, x, 0, w, h, SWP_NOACTIVATE | SWP_FRAMECHANGED | SWP_SHOWWINDOW);
+                }).detach();
+                capture_.start(window_);
+                hostLog("minecraft: showing the %s window %p", w.game ? "game" : "launcher", static_cast<void*>(want));
+            }
+        }
+        if (!minecraftAlive_) { hostLog("minecraft: its windows are gone"); kill(); }
+        return;
+    }
     if (window_) {
         // Apps resize themselves (RetroArch does on content load); keep nudging it back.
         uint64_t now = GetTickCount64();
@@ -283,7 +388,11 @@ void Session::quit() {
     if (!process_ || quitAt_) return;
     quitAt_ = GetTickCount64();
     if (isRetro(id_)) command("QUIT");
-    else if (isVideo(id_)) mpv_.command(R"(["quit"])");
+    else if (id_ == AppId::Minecraft) {
+        minecraft::Windows w = minecraft::find(pid_);
+        if (w.game) PostMessageW(w.game, WM_CLOSE, 0, 0);
+        if (w.launcher) PostMessageW(w.launcher, WM_CLOSE, 0, 0);
+    } else if (isVideo(id_)) mpv_.command(R"(["quit"])");
     else {
         const char msg[] = "quit";
         send(config_.balatroPort, msg, int(sizeof(msg) - 1));
@@ -294,6 +403,13 @@ void Session::kill() {
     mpv_.disconnect();
     capture_.stop();
     window_ = nullptr;
+    if (id_ == AppId::Minecraft && minecraftGame_ && IsWindow(minecraftGame_)) {  // the game is another process
+        DWORD gamePid = 0;
+        GetWindowThreadProcessId(minecraftGame_, &gamePid);
+        if (HANDLE h = gamePid ? OpenProcess(PROCESS_TERMINATE, FALSE, gamePid) : nullptr) { TerminateProcess(h, 0); CloseHandle(h); }
+    }
+    minecraftGame_ = nullptr;
+    minecraftAlive_ = false;
     if (process_) {
         if (alive()) TerminateProcess(process_, 0);
         CloseHandle(process_);

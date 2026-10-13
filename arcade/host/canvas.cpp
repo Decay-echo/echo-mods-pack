@@ -78,7 +78,8 @@ Config loadConfig() {
     GetPrivateProfileStringW(L"host", L"window_mode", L"desktop", mode, 64, ini.c_str());
     c.windowMode = mode;
     wchar_t audio[256];
-    GetPrivateProfileStringW(L"host", L"audio_device", L"Oculus Virtual Audio|Meta Quest|Rift", audio, 256, ini.c_str());
+    GetPrivateProfileStringW(L"host", L"audio_device", L"Rift Audio|Meta Quest|Oculus Virtual Audio", audio, 256, ini.c_str());
+    c.appVolume = float(std::clamp(int(GetPrivateProfileIntW(L"host", L"app_volume", 65, ini.c_str())), 0, 100)) / 100;
     c.audioDevice = audio;
     wchar_t gun[32];
     GetPrivateProfileStringW(L"host", L"light_gun", L"touch", gun, 32, ini.c_str());
@@ -86,6 +87,14 @@ Config loadConfig() {
     wchar_t buttons[32];
     GetPrivateProfileStringW(L"host", L"freeze_buttons", L"position", buttons, 32, ini.c_str());
     c.freezeButtons = buttons;
+    c.minecraft = get(L"minecraft");
+    c.curseforge = get(L"curseforge");
+    c.modrinth = get(L"modrinth");
+    c.prism = get(L"prism");
+    c.moviesTile = GetPrivateProfileIntW(L"host", L"movies_tile", 0, ini.c_str()) != 0;
+    wchar_t look[32];
+    GetPrivateProfileStringW(L"minecraft", L"look_speed", L"3", look, 32, ini.c_str());
+    c.minecraftLook = float(std::clamp(_wtof(look), 0.5, 20.0));
     c.balatroPort = GetPrivateProfileIntW(L"host", L"balatro_port", c.balatroPort, ini.c_str());
     c.retroCmdPort = GetPrivateProfileIntW(L"host", L"retroarch_command_port", c.retroCmdPort, ini.c_str());
     c.retroPadPort = GetPrivateProfileIntW(L"host", L"retroarch_pad_port", c.retroPadPort, ini.c_str());

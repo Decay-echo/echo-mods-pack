@@ -6,14 +6,28 @@
 #include <deque>
 #include <thread>
 
-enum class AppId { BalatroSteam, DuckHunt, RetroArch, Doom, Movies, Plex, YouTube };
+enum class AppId { BalatroSteam, DuckHunt, RetroArch, Doom, Movies, Plex, YouTube, OwnGame, Minecraft };
 
 struct AppInfo {
     AppId id;
     std::wstring title, subtitle, missing;  // missing: why it cannot start (empty = ready)
     uint32_t accent;
+    std::wstring core, rom;                 // OwnGame: its RetroArch core and the game file
 };
+
+// A way to start Minecraft Java Edition: the official launcher, CurseForge, Modrinth, Prism.
+struct Launcher {
+    std::wstring name, exe, args;  // exe may be "shell:AppsFolder\..." (explorer starts a Store app)
+};
+std::vector<Launcher> minecraftLaunchers(const Config& config);
 std::vector<AppInfo> listApps(const Config& config);
+
+// Your own games for the launcher's tiles (playlists.cpp): the ones named in roms\tiles.txt,
+// else the newest game files in the ROM folders, up to `most`.
+struct OwnGame {
+    std::wstring title, system, core, rom;
+};
+std::vector<OwnGame> ownGames(const Config& config, size_t most);
 bool isRetro(AppId id);
 bool isVideo(AppId id);
 
@@ -25,8 +39,10 @@ public:
     Session(const Config& config);
     ~Session();
     // target: video for Movies/Plex. YouTube: playlist = the videos' links, played from playlistStart.
+    // target: video for Movies/Plex, the game file for OwnGame (extra = its core), the launcher
+    // for Minecraft (extra = its arguments). YouTube: playlist = the videos' links, from playlistStart.
     bool launch(AppId id, const std::wstring& target = L"", double startSeconds = 0,
-                const std::vector<std::wstring>& playlist = {}, int playlistStart = 0);
+                const std::vector<std::wstring>& playlist = {}, int playlistStart = 0, const std::wstring& extra = L"");
     void poll();                 // finds and places the window, starts capture
     bool alive() const;
     bool hasWindow() const { return window_ != nullptr; }
@@ -60,7 +76,9 @@ private:
     HANDLE process_ = nullptr;
     DWORD pid_ = 0;
     HWND window_ = nullptr;
-    uint64_t started_ = 0, quitAt_ = 0, lastPlace_ = 0, lastWindow_ = 0;
+    uint64_t started_ = 0, quitAt_ = 0, lastPlace_ = 0, lastWindow_ = 0, lastLook_ = 0;
+    bool minecraftAlive_ = false;   // Minecraft: its windows are still up (the launcher process may be gone)
+    HWND minecraftGame_ = nullptr;  // the game's own window, once it is up
     bool padState_[PadCount] = {};
     int16_t stick_[2][2] = {};
     MpvControl mpv_;

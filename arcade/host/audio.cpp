@@ -6,6 +6,7 @@
 // this uses the same per-process policy, via the AudioPolicyConfig factory that the
 // volume mixer and tools like EarTrumpet use.
 #include "host.h"
+#include <audiopolicy.h>
 #include <mmdeviceapi.h>
 #include <functiondiscoverykeys_devpkey.h>
 #include <roapi.h>
@@ -85,6 +86,33 @@ AudioTarget findAudioDevice(const std::wstring& patterns) {
         }
     }
     return out;
+}
+
+// The process's own volume on the device (Windows' per-app volume), 0..1. False until the
+// process has an audio session there, which it gets once it plays something.
+bool setProcessVolume(DWORD pid, const AudioTarget& target, float level) {
+    ComPtr<IMMDeviceEnumerator> enumerator;
+    ComPtr<IMMDevice> device;
+    if (FAILED(CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL, IID_PPV_ARGS(&enumerator)))) return false;
+    if (target.id.empty() ? FAILED(enumerator->GetDefaultAudioEndpoint(eRender, eMultimedia, &device)) : FAILED(enumerator->GetDevice(target.id.c_str(), &device)))
+        return false;
+    ComPtr<IAudioSessionManager2> manager;
+    if (FAILED(device->Activate(__uuidof(IAudioSessionManager2), CLSCTX_ALL, nullptr, &manager))) return false;
+    ComPtr<IAudioSessionEnumerator> sessions;
+    if (FAILED(manager->GetSessionEnumerator(&sessions))) return false;
+    int count = 0;
+    sessions->GetCount(&count);
+    bool done = false;
+    for (int i = 0; i < count; i++) {
+        ComPtr<IAudioSessionControl> control;
+        ComPtr<IAudioSessionControl2> control2;
+        DWORD sessionPid = 0;
+        if (FAILED(sessions->GetSession(i, &control)) || FAILED(control.As(&control2)) || FAILED(control2->GetProcessId(&sessionPid)) || sessionPid != pid)
+            continue;
+        ComPtr<ISimpleAudioVolume> volume;
+        if (SUCCEEDED(control.As(&volume)) && SUCCEEDED(volume->SetMasterVolume(std::clamp(level, 0.f, 1.f), nullptr))) done = true;
+    }
+    return done;
 }
 
 bool routeProcessAudio(DWORD pid, const AudioTarget& target) {

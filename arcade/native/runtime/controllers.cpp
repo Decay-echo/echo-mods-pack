@@ -48,12 +48,24 @@ constexpr size_t NAV_STRIDE = 0x280, NAV_BODY = 0xD8, BODY_VELOCITY = 0x70;
 
 using GetInputState = int(__cdecl*)(void* session, uint32_t type, InputState* state);
 using NavUpdate = uint64_t(__fastcall*)(void* system, void* entry, float dt);
+// ovrTrackingState (LibOVR 1.x, 312 bytes; a little more here for safety): the head pose at 0,
+// the hand poses at 96 and 184, each pose's position 16 bytes in (after its orientation).
+struct TrackingState { unsigned char bytes[320]; };
+using GetTrackingState = TrackingState(__cdecl*)(void* session, double absTime, char latencyMarker);
+constexpr size_t HEAD_POSITION = 16, HAND_POSITION[2] = {96 + 16, 96 + 88 + 16};
+constexpr float HANDS_UP_ABOVE_HEAD = 0.10f;   // m: a controller this far above the headset counts as up
+constexpr uint64_t HANDS_UP_MS = 5000;         // both hands up this long: the player wants out of FREEZE
+constexpr float HANDS_TOGETHER = 0.28f;        // m: the right hand this close to the left is reaching for the wrist tablet
 
 arcade::Shared* shared = nullptr;
 P exe = nullptr;
 HANDLE modeEvent = nullptr;
 GetInputState realGetInputState = nullptr;
+GetTrackingState getTrackingState = nullptr;
 NavUpdate realNavUpdate = nullptr;
+std::atomic<uint64_t> handsUpSince{0};
+std::atomic<bool> released{false};
+std::atomic<bool> handsTogether{false};  // the right grip then goes to Echo: grab the tablet, throw it away
 std::atomic<bool> inputHooked{false}, navHooked{false}, triedHooks{false};
 std::atomic<uint64_t> lastFreeze{0};
 std::atomic<bool> eventSet{false};
@@ -68,9 +80,29 @@ bool wanted() {
 
 std::atomic<void*> navSystem{nullptr};  // the local player's PlayerNav system: a new one means a new level
 
+// Both hands held above the head for HANDS_UP_MS: the host sees ControllersReleased and ends
+// FREEZE. A way out that needs no button.
+void watchHandsUp(void* session) {
+    if (!getTrackingState) return;
+    TrackingState t = getTrackingState(session, 0.0, 0);
+    float head[3], hand[2][3];
+    std::memcpy(head, t.bytes + HEAD_POSITION, sizeof head);
+    std::memcpy(hand[0], t.bytes + HAND_POSITION[0], sizeof hand[0]);
+    std::memcpy(hand[1], t.bytes + HAND_POSITION[1], sizeof hand[1]);
+    bool up = hand[0][1] > head[1] + HANDS_UP_ABOVE_HEAD && hand[1][1] > head[1] + HANDS_UP_ABOVE_HEAD;
+    float dx = hand[0][0] - hand[1][0], dy = hand[0][1] - hand[1][1], dz = hand[0][2] - hand[1][2];
+    handsTogether = dx * dx + dy * dy + dz * dz < HANDS_TOGETHER * HANDS_TOGETHER;
+    uint64_t now = GetTickCount64();
+    if (!up) { handsUpSince = 0; return; }
+    uint64_t since = handsUpSince.load();
+    if (!since) { handsUpSince = now; return; }
+    if (now - since >= HANDS_UP_MS && !released.exchange(true)) logf("controllers: both hands above the head for %llu s: FREEZE off", HANDS_UP_MS / 1000);
+}
+
 int __cdecl hookedGetInputState(void* session, uint32_t type, InputState* state) {
     int result = realGetInputState(session, type, state);
     if (result < 0 || !state || !(type & (LTOUCH | RTOUCH)) || !wanted()) return result;
+    if (type & LTOUCH) watchHandsUp(session);
     {
         std::lock_guard<std::mutex> lock(padLock);
         if (type & LTOUCH) {
@@ -82,15 +114,19 @@ int __cdecl hookedGetInputState(void* session, uint32_t type, InputState* state)
         if (type & RTOUCH) {
             padNow.buttons = (padNow.buttons & ~RIGHT_BUTTONS) | (state->buttons & RIGHT_BUTTONS);
             padNow.touches = (padNow.touches & ~RIGHT_TOUCHES) | (state->touches & RIGHT_TOUCHES);
-            padNow.trigger[1] = state->trigger[1]; padNow.grip[1] = state->grip[1];
+            padNow.trigger[1] = state->trigger[1]; padNow.grip[1] = handsTogether ? 0.f : state->grip[1];
             padNow.stick[1][0] = state->stick[1][0]; padNow.stick[1][1] = state->stick[1][1];
         }
         arcade::writePad(shared, padNow);
     }
-    // Neutral controllers for Echo: everything that moves you or presses something.
+    // Neutral controllers for Echo: everything that moves you or presses something. Except the
+    // right grip while the hands are together: that is a grab of the wrist tablet (to throw it
+    // away), which Echo keeps; the arcade's pad doesn't see it.
+    float grip = state->grip[1], gripNd = state->gripNoDeadzone[1], gripRaw = state->gripRaw[1];
     state->buttons = 0;
     std::memset(state->trigger, 0, offsetof(InputState, controllerType) - offsetof(InputState, trigger));
     std::memset(state->triggerNoDeadzone, 0, sizeof(InputState) - offsetof(InputState, triggerNoDeadzone));
+    if ((type & RTOUCH) && handsTogether) { state->grip[1] = grip; state->gripNoDeadzone[1] = gripNd; state->gripRaw[1] = gripRaw; }
     return result;
 }
 
@@ -165,6 +201,8 @@ bool navUpdateLooksRight() {
 void installHooks() {
     HMODULE ovr = GetModuleHandleW(L"LibOVRRT64_1.dll");
     void* input = ovr ? reinterpret_cast<void*>(GetProcAddress(ovr, "ovr_GetInputState")) : nullptr;
+    getTrackingState = ovr ? reinterpret_cast<GetTrackingState>(GetProcAddress(ovr, "ovr_GetTrackingState")) : nullptr;
+    if (!getTrackingState) logf("controllers: ovr_GetTrackingState not found; the hands-up way out of FREEZE is off");
     if (!input) {
         logf("controllers: Oculus runtime (LibOVRRT64_1.dll) not loaded; controllers unavailable");
     } else {
@@ -206,7 +244,8 @@ void tick(uint64_t now) {
     if (want && !triedHooks.exchange(true)) installHooks();
     bool on = want && inputHooked;
     bool frozen = on && navHooked && now - lastFreeze.load() < 500;
-    shared->controllerState = !on ? arcade::ControllersOff : frozen ? arcade::ControllersFrozen : arcade::ControllersOn;
+    if (!want) { released = false; handsUpSince = 0; handsTogether = false; }
+    shared->controllerState = !on ? arcade::ControllersOff : released ? arcade::ControllersReleased : frozen ? arcade::ControllersFrozen : arcade::ControllersOn;
     if (modeEvent && on != eventSet) {
         if (on) SetEvent(modeEvent); else ResetEvent(modeEvent);
         eventSet = on;

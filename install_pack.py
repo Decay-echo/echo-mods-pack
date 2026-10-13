@@ -182,7 +182,7 @@ def install(args):
         print(' - Settings: the arcade\'s gear tab on the hand tablet (HUD, glow, visor lines, and NORMAL to switch it '
               'all off, or take it all out when Echo closes).')
         print(' - Arcade: open the hand tablet and press the gamepad tab (far left). FREEZE (top of the launcher) '
-              'lets your Touch controllers play RetroArch; hold the menu button 1 s to move again.')
+              'lets your Touch controllers play RetroArch or Minecraft; both hands above your head for 5 s to move again.')
         print('   Your games go in ' + str(ARCADE / 'apps' / 'roms') + ' (one folder per system, see the README there).')
 
 

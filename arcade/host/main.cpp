@@ -2,6 +2,7 @@
 // Owns the tablet UI (launcher, browsers, touch controls) and the running app;
 // exits when Echo VR goes away.
 #include "apps.h"
+#include "minecraft.h"
 #include "mod_settings.h"
 #include "touchpad.h"
 #include <winrt/base.h>
@@ -28,6 +29,7 @@ const PadButton PAD[] = {
 const Rect STICK_AREA{1, 201, 199, 399}, STICK_TOGGLE{16, 412, 184, 458};
 const Rect RETRO_HOME{108, 470, 184, 526}, RETRO_MENU{936, 470, 1012, 526};
 const Rect RETRO_FREEZE{16, 84, 184, 160};                  // FREEZE on the RetroArch screen
+const Rect RETRO_FULL{840, 84, 1008, 160};                  // FULL SCREEN: the pad goes, the picture gets the whole tablet
 const Rect BALATRO_HOME{0, 0, 64, 64};
 const Rect RESUME_BUTTON{312, 170, 712, 240}, QUIT_BUTTON{312, 252, 712, 322};
 const Rect BACK_BUTTON{12, 10, 150, 66};
@@ -214,8 +216,10 @@ private:
         if (app.id == AppId::Movies) { openMovies(); return; }
         if (app.id == AppId::Plex) { openPlex(); return; }
         if (app.id == AppId::YouTube) { openYouTube(); return; }
-        if (!session_.launch(app.id)) { message_ = L"Could not start " + app.title + L" (see host.log)."; return; }
+        if (app.id == AppId::Minecraft) { openMinecraft(); return; }
+        if (!session_.launch(app.id, app.rom, 0, {}, 0, app.core)) { message_ = L"Could not start " + app.title + L" (see host.log)."; return; }
         gunUsed_ = false;
+        padHidden_ = false;
         mode_ = Mode::Running;
         resetInput();
     }
@@ -228,6 +232,43 @@ private:
         controlsUntil_ = 0;
         resetInput();
     }
+
+    // ------------------------------------------------ Minecraft (Java Edition)
+    // One launcher starts at once; several (CurseForge, Modrinth, Prism) are offered first.
+    void openMinecraft() {
+        std::vector<Launcher> launchers = minecraftLaunchers(config_);
+        if (launchers.empty()) { message_ = L"No Minecraft launcher found: install Java Edition (or CurseForge / Modrinth / Prism)."; return; }
+        if (launchers.size() == 1) { startMinecraft(launchers[0]); return; }
+        Screen s{L"MINECRAFT"};
+        for (auto& l : launchers) s.entries.push_back({l.name, l.exe.rfind(L"shell:", 0) == 0 ? L"Microsoft Store" : l.exe, [this, l] { startMinecraft(l); }});
+        push(s);
+    }
+    void startMinecraft(const Launcher& l) {
+        if (!session_.launch(AppId::Minecraft, l.exe, 0, {}, 0, l.args)) { message_ = L"Could not start " + l.name + L" (see host.log)."; return; }
+        hostLog("minecraft: starting %ls%s", l.name.c_str(), freeze_ ? " (frozen already: it gets the controllers when its window is up)" : "");
+        if (freeze_) { if (!echoWindow_) echoWindow_ = GetForegroundWindow(); lastRefocus_ = 0; }
+        gunUsed_ = false;
+        padHidden_ = false;
+        mode_ = Mode::Running;
+        screens_.clear();
+        resetInput();
+        message_ = L"Pick a profile and PLAY (tap the tablet), then FREEZE: your controllers play Minecraft.";
+    }
+    // A tap on the picture clicks there in the launcher or the game's menus (posted: no focus).
+    void minecraftTouch(const Touch& t) {
+        if (BALATRO_HOME.contains(t.x, t.y)) { if (!t.down) openMenu(); return; }
+        if (t.down || !session_.hasWindow()) { if (!t.down) pressed_ = -1; return; }
+        float u, v;
+        if (!toApp(t.x, t.y, u, v)) return;
+        HWND window = session_.window();
+        RECT client{};
+        GetClientRect(window, &client);
+        POINT at{LONG(u * client.right), LONG(v * client.bottom)};
+        ClientToScreen(window, &at);
+        pageHover(window, at);
+        pageTap(window, at);
+    }
+    HWND echoWindow() { return echoWindow_ && IsWindow(echoWindow_) ? echoWindow_ : minecraft::mainWindowOf(DWORD(shared_->gamePid)); }
 
     // ------------------------------------------------ movies
     void openMovies() {
@@ -728,21 +769,28 @@ private:
         if (freeze_) stopFreeze(L"Freeze off: you can move again. Your game is paused.");
         else startFreeze();
     }
+    bool minecraftChooser() const { return !session_.alive() && current_.id == AppId::Minecraft && mode_ == Mode::Browse; }
     void startFreeze() {
-        if (session_.alive() && !isRetro(session_.id())) {
-            message_ = L"Freeze plays RetroArch: quit " + current_.title + L" first.";
+        bool mc = (session_.alive() && session_.id() == AppId::Minecraft) || minecraftChooser();
+        if (session_.alive() && !isRetro(session_.id()) && !mc) {
+            message_ = L"Freeze plays RetroArch or Minecraft: quit " + current_.title + L" first.";
             return;
         }
-        if (!session_.alive()) {
+        if (!session_.alive() && !mc) {
             auto it = std::find_if(apps_.begin(), apps_.end(), [](const AppInfo& a) { return a.id == AppId::RetroArch; });
             if (it == apps_.end()) { message_ = L"RetroArch isn't set up (tools\\setup_apps.py)."; return; }
             launch(*it);
             if (!session_.alive()) return;  // launch() said why
-        } else if (pausedByFreeze_) {
+        } else if (pausedByFreeze_ && isRetro(session_.id())) {
             session_.resumeRetro();
         }
         pausedByFreeze_ = false;
-        mode_ = Mode::Running;
+        if (mc) {  // keyboard and mouse go to the window in front: Minecraft's, once it is up
+            echoWindow_ = GetForegroundWindow();
+            if (session_.alive() && !minecraft::focus(session_.window())) message_ = L"Minecraft's window would not come to the front; tap FREEZE again.";
+            lastRefocus_ = GetTickCount64();
+        }
+        if (!minecraftChooser()) mode_ = Mode::Running;  // on the launcher page: stay, pick one
         resetInput();
         touchPad_.reset();
         padFrame_ = {};
@@ -752,19 +800,28 @@ private:
         shared_->controllerWant = 1;
         freeze_ = true;
         freezeAt_ = GetTickCount64();
-        message_ = L"Frozen: your controllers play RetroArch. Hold the menu button 1 s (or tap FREEZE) to move again.";
+        padHidden_ = true;  // the controllers play: the picture gets the whole tablet
+        message_ = minecraftChooser() ? L"Frozen. Pick a launcher: your controllers play Minecraft once it is up."
+                 : mc ? L"Frozen: your controllers play Minecraft. Both hands above your head for 5 s (or hold the menu button 1 s) to move again."
+                      : L"Frozen: your controllers play RetroArch. Both hands above your head for 5 s (or hold the menu button 1 s) to move again.";
         hostLog("freeze: on (level #%ld)", freezeLevel_);
     }
     void stopFreeze(const std::wstring& why) {
         if (!freeze_) return;
         freeze_ = false;
         shared_->controllerWant = 0;
+        padHidden_ = false;
         releaseController();
         if (session_.alive() && isRetro(session_.id()) && session_.pauseRetro()) pausedByFreeze_ = true;
+        if (session_.id() == AppId::Minecraft) {  // Echo in front again: Minecraft pauses itself on losing the focus
+            mcInput_.releaseAll();
+            if (!minecraft::focus(echoWindow())) hostLog("freeze: could not give Echo VR the focus back");
+        }
         message_ = why;
         hostLog("freeze: off");
     }
     void releaseController() {
+        mcInput_.releaseAll();
         for (int p = 0; p < PadCount; p++) session_.pad(Pad(p), false);
         session_.analog(0, 0, 0);
         session_.analog(1, 0, 0);
@@ -776,7 +833,12 @@ private:
     void pollFreeze(uint64_t now) {
         if (!freeze_) return;
         if (shared_->levelSerial != freezeLevel_) { stopFreeze(L"New level: freeze is off and your game is paused."); return; }
-        if (!session_.alive() || !isRetro(session_.id())) { stopFreeze(L"RetroArch closed: freeze is off."); return; }
+        bool mc = (session_.alive() && session_.id() == AppId::Minecraft) || minecraftChooser();
+        if (!mc && (!session_.alive() || !isRetro(session_.id()))) { stopFreeze(L"The game closed: freeze is off."); return; }
+        if (!standalone_ && shared_->controllerState == arcade::ControllersReleased) {
+            stopFreeze(L"Hands up: freeze is off and your game is paused.");
+            return;
+        }
         if (!standalone_ && shared_->controllerState == arcade::ControllersOff && now - freezeAt_ > 4000) {
             stopFreeze(L"Freeze couldn't take the controllers (see runtime.log).");
             return;
@@ -789,6 +851,18 @@ private:
         LONG64 tick = 0;
         if (!arcade::readPad(shared_, s, &tick) || now - uint64_t(tick) > 500) s = {};  // stale: let go of everything
         padFrame_ = touchPad_.step(s, now, stickMode_, config_.freezeButtons == L"labels");
+        if (mc) {
+            // The game window must be in front for keys and mouse to reach it (also after the
+            // launcher hands over to the game, a new window).
+            if (now - lastRefocus_ > 1000 && session_.hasWindow() && GetForegroundWindow() != session_.window()) {
+                lastRefocus_ = now;
+                minecraft::focus(session_.window());
+            }
+            mcInput_.apply(s, padFrame_, config_.minecraftLook, session_.window());
+            padFed_ = true;
+            if (padFrame_.release) stopFreeze(L"Freeze off: you can move again. Minecraft is paused.");
+            return;
+        }
         for (int p = 0; p < PadCount; p++) session_.pad(Pad(p), padFrame_.pad[p]);  // sends changes only
         auto steps = [](float v) { return std::round(v * 64) / 64; };               // fewer packets for tiny drifts
         session_.analog(0, steps(padFrame_.left[0]), steps(padFrame_.left[1]));
@@ -1288,6 +1362,7 @@ private:
             case Mode::Running:
                 if (isVideo(session_.id())) playerTouch(t);
                 else if (isRetro(session_.id())) retroTouch(t);
+                else if (session_.id() == AppId::Minecraft) minecraftTouch(t);
                 else balatroTouch(t);
                 break;
         }
@@ -1314,6 +1389,7 @@ private:
         auto& s = screens_.back();
         int pages = std::max(1, (int(s.entries.size()) + ROWS_PER_PAGE - 1) / ROWS_PER_PAGE);
         if (tapped(t, 100, BACK_BUTTON)) { back(); return; }
+        if (tapped(t, 501, DOCK_BUTTON)) { freezeTapped(); return; }  // FREEZE sits where DOCK does on the launcher
         if (tapped(t, 101, PAGE_UP)) { s.page = std::max(0, s.page - 1); return; }
         if (tapped(t, 102, PAGE_DOWN)) { s.page = std::min(pages - 1, s.page + 1); return; }
         for (int i = 0; i < ROWS_PER_PAGE; i++) {
@@ -1379,7 +1455,21 @@ private:
         if (!t.down) pressed_ = -1;
     }
 
+    void hidePad(bool hide) {
+        padHidden_ = hide;
+        if (hide && !freeze_) {  // whatever a finger was holding is let go
+            for (auto& b : PAD) session_.pad(b.pad, false);
+            session_.analog(0, 0);
+            std::fill(std::begin(padHeld_), std::end(padHeld_), false);
+        }
+    }
     void retroTouch(const Touch& t) {
+        if (padHidden_) {  // only the small button at the top-right brings the pad back
+            if (tapped(t, 404, CONTROLS_BUTTON)) hidePad(false);
+            else if (!t.down) pressed_ = -1;
+            return;
+        }
+        if (tapped(t, 404, RETRO_FULL)) { hidePad(true); return; }
         if (tapped(t, 400, RETRO_HOME)) { openMenu(); return; }
         if (tapped(t, 401, RETRO_MENU)) { session_.command("MENU_TOGGLE"); return; }
         if (tapped(t, 403, RETRO_FREEZE)) { freezeTapped(); return; }
@@ -1499,7 +1589,13 @@ private:
             canvas_.fill(r, on ? rgb(48, 56, 80) : rgb(30, 34, 50));
             canvas_.fill({r.x0, r.y0, r.x0 + 12, r.y1}, a.accent);
             canvas_.frame(r, on ? rgb(255, 255, 255) : rgb(50, 58, 84), on ? 4 : 2);
-            canvas_.text({r.x0 + 30, r.y0 + 26, r.x1 - 12, r.y0 + 96}, a.title, 40, rgb(245, 245, 250), true, 0);
+            size_t split = a.title.size() > 13 ? a.title.rfind(L' ', a.title.size() / 2 + 3) : std::wstring::npos;  // long names: two lines
+            if (split == std::wstring::npos || split == 0) {
+                canvas_.text({r.x0 + 30, r.y0 + 26, r.x1 - 12, r.y0 + 96}, a.title, a.title.size() > 13 ? 28 : 40, rgb(245, 245, 250), true, 0);
+            } else {
+                canvas_.text({r.x0 + 30, r.y0 + 22, r.x1 - 12, r.y0 + 60}, a.title.substr(0, split), 28, rgb(245, 245, 250), true, 0);
+                canvas_.text({r.x0 + 30, r.y0 + 58, r.x1 - 12, r.y0 + 96}, a.title.substr(split + 1), 28, rgb(245, 245, 250), true, 0);
+            }
             canvas_.text({r.x0 + 30, r.y0 + 96, r.x1 - 12, r.y0 + 134}, a.subtitle, 21, rgb(180, 190, 210), false, 0);
             if (!a.missing.empty())
                 canvas_.text({r.x0 + 30, r.y0 + 140, r.x1 - 12, r.y0 + 180}, a.missing, 17, rgb(255, 170, 90), false, 0);
@@ -1511,6 +1607,8 @@ private:
         auto& s = screens_.back();
         canvas_.clear(rgb(14, 16, 24));
         header(s.title, true);
+        canvas_.fill({730, 0, SCREEN_W, 76}, rgb(22, 26, 40));  // room for FREEZE
+        button(DOCK_BUTTON, freezeLabel(), pressed_ == 501, freeze_ ? rgb(40, 110, 60) : rgb(50, 58, 84), 22);
         int pages = std::max(1, (int(s.entries.size()) + ROWS_PER_PAGE - 1) / ROWS_PER_PAGE);
         for (int i = 0; i < ROWS_PER_PAGE; i++) {
             size_t index = size_t(s.page * ROWS_PER_PAGE + i);
@@ -1603,7 +1701,7 @@ private:
     }
 
     void drawApp() {
-        Rect content = session_.contentRect();
+        Rect content = padHidden_ && isRetro(session_.id()) ? Rect{0, 0, SCREEN_W, SCREEN_H} : session_.contentRect();
         canvas_.clear(rgb(10, 10, 14));
         uint64_t before = captureSerial_;
         session_.capture().latest(pixels_, capW_, capH_, captureSerial_);
@@ -1658,6 +1756,7 @@ private:
     }
 
     void drawPad() {
+        if (padHidden_) { controlsButton(false); return; }
         canvas_.fill({0, 0, 200, SCREEN_H}, rgb(20, 22, 30));
         canvas_.fill({824, 0, SCREEN_W, SCREEN_H}, rgb(20, 22, 30));
         bool live = mode_ == Mode::Running;
@@ -1684,6 +1783,7 @@ private:
         button(RETRO_FREEZE, freeze_ ? L"FREEZE: ON" : L"FREEZE", pressed_ == 403, freeze_ ? rgb(40, 110, 60) : rgb(50, 58, 84), 22);
         if (freeze_) canvas_.text({0, 162, 200, 196}, L"hold \x2261 1 s to move", 15, rgb(170, 220, 170), false);
         button(RETRO_MENU, L"MENU", pressed_ == 401, rgb(60, 50, 110));
+        button(RETRO_FULL, L"FULL SCREEN", pressed_ == 404, rgb(40, 70, 90), 20);
     }
 
     void drawMenu() {
@@ -1755,6 +1855,10 @@ private:
     int cropX_ = 0, cropY_ = 0, cropW_ = 0, cropH_ = 0;  // the page's part of the capture
     int fingerX0_ = 0, fingerY0_ = 0, fingerX_ = 0, fingerY_ = 0;
     bool docBusy_ = false, fingerDown_ = false, scrolled_ = false, keyboardForScreen_ = false, toolbar_ = false, screenWasTopmost_ = false;
+    bool padHidden_ = false;            // RetroArch: FULL SCREEN, the on-screen pad away
+    minecraft::Input mcInput_;          // FREEZE in Minecraft: the controllers as keyboard and mouse
+    HWND echoWindow_ = nullptr;         // Echo VR's window, to give the focus back to
+    uint64_t lastRefocus_ = 0;
     std::string linkPin_;
     uint64_t linkStarted_ = 0, lastLinkPoll_ = 0, controlsUntil_ = 0, lastTimeline_ = 0;
     PlexItem plexItem_;

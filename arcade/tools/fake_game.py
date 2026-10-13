@@ -11,6 +11,7 @@
     python tools/fake_game.py shot X Y              # a bullet hits the docked poster at pixel X,Y
     python tools/fake_game.py pad KEYS LX LY RX RY SECONDS   # FREEZE: the Touch controllers, e.g. A+RT 0 1 0 0 0.5
     python tools/fake_game.py level                 # a new level loads (FREEZE ends)
+    python tools/fake_game.py handsup               # both hands above the head for 5 s (FREEZE ends)
 
 KEYS for pad: A B X Y LTHUMB RTHUMB MENU (buttons), LT RT (triggers), LG RG (grips), joined
 with +, or "none". Sticks are -1..1 with y up, like the Touch controllers.
@@ -43,6 +44,9 @@ if struct.unpack_from('<I', shm, 0)[0] != 0x41524344:
 struct.pack_into('<2I', shm, 20, COLS, ROWS)
 
 
+HANDS_UP = [False]
+
+
 def beat():
     struct.pack_into('<i', shm, GAME_PID, 4242)
     struct.pack_into('<i', shm, PAGE_VISIBLE, 1)
@@ -57,7 +61,7 @@ def beat():
     # FREEZE: frozen while the host wants it in this level (ControllersFrozen = 2)
     want, level, current = struct.unpack_from('<3i', shm, CTRL_WANT)[0], struct.unpack_from('<i', shm, CTRL_LEVEL)[0], \
         struct.unpack_from('<i', shm, LEVEL_SERIAL)[0]
-    struct.pack_into('<i', shm, CTRL_STATE, 2 if want and level == current else 0)
+    struct.pack_into('<i', shm, CTRL_STATE, 3 if HANDS_UP[0] and want else 2 if want and level == current else 0)
 
 
 KEYS = {'A': 0x1, 'B': 0x2, 'RTHUMB': 0x4, 'X': 0x100, 'Y': 0x200, 'LTHUMB': 0x400, 'MENU': 0x100000}
@@ -147,6 +151,8 @@ elif cmd == 'pad':
         beat(); pad(keys, lx, ly, rx, ry); time.sleep(0.011)  # the game reads the controllers every frame
     for _ in range(20):
         beat(); pad('none', 0, 0, 0, 0); time.sleep(0.011)
+elif cmd == 'handsup':
+    HANDS_UP[0] = True; wait(1.0); HANDS_UP[0] = False
 elif cmd == 'level':
     struct.pack_into('<i', shm, LEVEL_SERIAL, struct.unpack_from('<i', shm, LEVEL_SERIAL)[0] + 1); wait(0.5)
 elif cmd == 'drag':

@@ -44,7 +44,7 @@ enum DockState : LONG { Undocked = 0, Docked = 1, DockFailed = 2 };
 // the game hides the Touch controllers' buttons and sticks from Echo VR, holds the player still
 // and copies the real controllers into pad for RetroArch. Off: the game is not doing it (yet,
 // or it couldn't hook).
-enum ControllerState : LONG { ControllersOff = 0, ControllersOn = 1, ControllersFrozen = 2 };
+enum ControllerState : LONG { ControllersOff = 0, ControllersOn = 1, ControllersFrozen = 2, ControllersReleased = 3 };  // Released: hands up
 constexpr uint32_t BUTTON_A = 0x1, BUTTON_B = 0x2, BUTTON_RTHUMB = 0x4, BUTTON_X = 0x100, BUTTON_Y = 0x200,
                    BUTTON_LTHUMB = 0x400, BUTTON_ENTER = 0x100000;  // ovrButton_* (Enter = the left menu button)
 struct PadState {

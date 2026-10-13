@@ -1,6 +1,8 @@
 // Builds RetroArch playlists from the ROM folders each time RetroArch is opened,
 // so dropped-in games appear under Playlists already paired with a core.
 #include "apps.h"
+#include <algorithm>
+#include <cwctype>
 #include <filesystem>
 #include <fstream>
 #include <map>
@@ -108,6 +110,73 @@ void collectReferenced(const fs::path& list, std::set<fs::path>& referenced) {
 }
 
 }  // namespace
+
+// The game's name for a tile: the file name without its tags, e.g.
+// "Super Smash Bros. Melee (USA) (En,Ja) (Rev 2)" -> "SUPER SMASH BROS. MELEE".
+static std::wstring tileTitle(const fs::path& rom) {
+    std::wstring s = rom.stem().wstring(), out;
+    int depth = 0;
+    for (wchar_t ch : s) {
+        if (ch == L'(' || ch == L'[') depth++;
+        else if (ch == L')' || ch == L']') depth = std::max(0, depth - 1);
+        else if (depth == 0) out += wchar_t(towupper(ch));
+    }
+    while (!out.empty() && out.back() == L' ') out.pop_back();
+    for (size_t i = 0; i + 1 < out.size();)  // doubled spaces where tags were
+        if (out[i] == L' ' && out[i + 1] == L' ') out.erase(i, 1); else i++;
+    return out.empty() ? lower(rom.stem().wstring()) : out;
+}
+
+std::vector<OwnGame> ownGames(const Config& c, size_t most) {
+    std::error_code ec;
+    fs::path roms = c.roms, retro = fs::path(c.retroarch).parent_path();
+    struct Found { OwnGame game; fs::file_time_type when; std::wstring stem; };
+    std::vector<Found> found;
+    for (auto& sys : SYSTEMS) {
+        if (!wcscmp(sys.folder, L"doom")) continue;  // the bundled shareware has its own tile
+        fs::path dir = roms / sys.folder;
+        if (!fs::is_directory(dir, ec)) continue;
+        std::set<fs::path> referenced;
+        std::vector<fs::path> games;
+        for (auto& e : fs::recursive_directory_iterator(dir, fs::directory_options::skip_permission_denied, ec)) {
+            if (!e.is_regular_file(ec)) continue;
+            auto ext = lower(e.path().extension().wstring());
+            if (ext == L".m3u" || ext == L".cue") collectReferenced(e.path(), referenced);
+            if (sys.extensions.count(ext)) games.push_back(e.path());
+        }
+        for (auto& g : games) {
+            std::error_code ec2;
+            if (referenced.count(fs::weakly_canonical(g, ec2))) continue;
+            std::wstring system = sys.folder;
+            for (auto& ch : system) ch = wchar_t(towupper(ch));
+            found.push_back({{tileTitle(g), system, (retro / L"cores" / (std::wstring(sys.core) + L"_libretro.dll")).wstring(), g.wstring()},
+                             fs::last_write_time(g, ec2), lower(g.stem().wstring())});
+        }
+    }
+    std::vector<OwnGame> out;
+    // roms\tiles.txt: the games you want on the tiles, one file name (or part of one) per line.
+    std::ifstream wanted(roms / L"tiles.txt", std::ios::binary);
+    std::string line;
+    while (out.size() < most && std::getline(wanted, line)) {
+        while (!line.empty() && (line.back() == '\r' || line.back() == ' ')) line.pop_back();
+        if (line.empty() || line[0] == '#') continue;
+        int n = MultiByteToWideChar(CP_UTF8, 0, line.c_str(), int(line.size()), nullptr, 0);
+        std::wstring wide(size_t(n), L'\0');
+        MultiByteToWideChar(CP_UTF8, 0, line.c_str(), int(line.size()), wide.data(), n);
+        wide = lower(wide);
+        for (auto& f : found)
+            if (f.stem.find(wide) != std::wstring::npos && std::none_of(out.begin(), out.end(), [&](const OwnGame& o) { return o.rom == f.game.rom; })) {
+                out.push_back(f.game);
+                break;
+            }
+    }
+    if (out.empty()) {  // else the newest files: the games you added last
+        std::stable_sort(found.begin(), found.end(), [](const Found& a, const Found& b) { return a.when > b.when; });
+        for (auto& f : found)
+            if (out.size() < most) out.push_back(f.game);
+    }
+    return out;
+}
 
 int writePlaylists(const Config& c) {
     std::error_code ec;

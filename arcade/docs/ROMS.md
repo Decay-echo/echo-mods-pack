@@ -2,6 +2,8 @@
 
 Put your own ROMs and disc images in the folder for each system (subfolders are fine). Each time you open RetroArch from the tablet, Echo Arcade rebuilds RetroArch's **Playlists** from these folders, with each game already paired with its core. With the tablet pad, go **Playlists → system → game → Run**.
 
+Up to three of your games also get tiles of their own on the launcher, in place of BALATRO, DUCK HUNT and DOOM: the ones named in `tiles.txt` in this folder (one file name, or part of one, per line: for example `melee` and `brawl`), else the newest game files here. A tile starts the game straight away with its core.
+
 | Folder | System | Core | File types |
 | --- | --- | --- | --- |
 | `atari2600` | Atari 2600 | Stella | a26 bin zip |

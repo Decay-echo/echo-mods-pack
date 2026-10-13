@@ -204,6 +204,12 @@ mpv={apps / 'mpv/mpv.exe'}
 ; YOUTUBE tile: yt-dlp finds the videos, mpv plays them; your saved links, one "Name | link" per line
 yt_dlp={apps / 'mpv/yt-dlp.exe'}
 youtube_links={apps / 'youtube.txt'}
+; MINECRAFT tile (Java Edition): your launchers are found by themselves (the Minecraft Launcher,
+; CurseForge, Modrinth App, Prism Launcher); a path here overrides the search
+minecraft=
+curseforge=
+modrinth=
+prism=
 ; video folders for MOVIES, separated by ;  (environment variables allowed)
 movies={apps / 'movies'};%USERPROFILE%\\Videos
 
@@ -212,8 +218,10 @@ movies={apps / 'movies'};%USERPROFILE%\\Videos
 ; offscreen: moved off the visible desktop (some apps throttle when off screen)
 window_mode=desktop
 ; where the apps' sound goes: output device name fragments separated by |, first match
-; wins (default: the Link / Air Link headset). "default" = the Windows default device.
-audio_device=Oculus Virtual Audio|Meta Quest|Rift
+; wins (the Rift's headphones, else a Quest over Link / Air Link). "default" = the Windows default device.
+audio_device=Rift Audio|Meta Quest|Oculus Virtual Audio
+; each app's own volume on that device (Windows' per-app volume), percent
+app_volume=65
 ; light gun for RetroArch games (Duck Hunt style), from your shots on the docked poster:
 ; touch: aims and fires without taking focus from Echo VR (default)
 ; focus: gives RetroArch focus and clicks the mouse at the spot; focus comes back after a pause
@@ -222,9 +230,15 @@ light_gun=touch
 ; FREEZE (your Touch controllers play RetroArch): A/B/X/Y on the RetroPad by position, like an
 ; Xbox pad (A bottom = B, B right = A, X left = Y, Y top = X), or "labels" (A = A, B = B ...)
 freeze_buttons=position
+; 1 = the MOVIES tile instead of MINECRAFT on the launcher
+movies_tile=0
 balatro_port=55410
 retroarch_command_port=55355
 retroarch_pad_port=55400
+
+[minecraft]
+; FREEZE in Minecraft: how fast the right stick turns you (mouse pixels per tick at full stick)
+look_speed=3
 """
     target.mkdir(parents=True, exist_ok=True)
     (target / 'arcade.ini').write_text(ini, encoding='utf-8')
