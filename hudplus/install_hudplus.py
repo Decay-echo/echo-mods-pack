@@ -117,6 +117,11 @@ enabled=1
 ; both = either team's passes (each in its colour), mine = only your team's
 teams=both
 count_from=6
+; a pass must reach the teammate within max_seconds of leaving the hand, with at most max_bounces
+; bounces on the way (1 = a bounce pass counts); a slower catch, or more bounces, is no pass and
+; the chain starts over at it
+max_seconds=5
+max_bounces=1
 ; box height (readout px) and how far above eye level (metres)
 size_px=26
 y_m=0.075
@@ -189,6 +194,13 @@ def main():
             lines += [''] + SETTINGS[SETTINGS.index('[passes]'):].rstrip('\n').splitlines()
             changed = True
             print('Added the pass counter settings ([passes]) to settings.ini')
+        elif 'max_bounces' not in text.lower():  # this version's pass rules, under count_from
+            at = next((i for i, l in enumerate(lines) if l.strip().lower().startswith('count_from=')), None)
+            rules = SETTINGS[SETTINGS.index('; a pass must reach'):SETTINGS.index('max_bounces=1') + len('max_bounces=1')].splitlines()
+            if at is not None:
+                lines[at + 1:at + 1] = rules
+                changed = True
+                print('Added the pass rules (max_seconds, max_bounces) to settings.ini')
         if changed:
             settings.write_text('\n'.join(lines) + '\n', encoding='utf-8')
     digits = HERE / 'data' / 'echo_digits.bin'

@@ -167,15 +167,20 @@ inline Possession readSession(const Json& doc) {
 }
 
 // ---- the chain ----------------------------------------------------------------------------
-// A pass: the disc goes from one player straight to a teammate. If it bounced on the way
-// (the API's bounce count went up while it was loose), the catch doesn't count; the chain
-// goes on. The other team getting it breaks the chain. A goal by the team with the chain
-// shows it big for a bit.
+// A pass: the disc leaves one player's hand and a teammate catches it within rules.maxSeconds,
+// having bounced at most rules.maxBounces times on the way (the API's bounce count, watched
+// while the disc is loose; one bounce = a bounce pass). A catch that misses those rules is no
+// pass, and the chain starts over at that catch. The other team getting the disc breaks the
+// chain. A goal by the team with the chain shows it big for a bit.
 constexpr double kPassPopSeconds = 1.0;   // how long "+1" stays up
 constexpr double kPassGoalSeconds = 2.0;  // the goal flash: three blinks
 constexpr float kPassGoalScale = 1.5f;
-
+struct PassRules {
+    double maxSeconds = 5.0;  // loose for longer than this before the catch: not a pass
+    int maxBounces = 1;       // more bounces than this on the way: not a pass
+};
 struct PassCounter {
+    PassRules rules;
     std::string session, holder;
     int team = -1, passes = 0;
     int points[2] = {-1, -1};
@@ -183,9 +188,11 @@ struct PassCounter {
     double goalAt = -1;
     int goalPasses = 0, goalTeam = -1;
     bool loose = false;                       // nobody has it since the last holder
+    double looseAt = 0;                       // when it was first seen loose
     int looseFirst = -1, looseMax = -1;       // the bounce count when it got loose, and the most seen since
-    int bounced = 0;                          // catches not counted because the disc bounced first
-
+    int bounced = 0, slow = 0;                // catches that were no pass: too many bounces / too long loose
+    double lastSeconds = 0;                   // the last teammate's catch: how long the disc was loose, and
+    int lastBounces = 0;                      //   how often it bounced (for the log)
     void breakChain() {
         team = -1;
         passes = 0;
@@ -223,14 +230,15 @@ struct PassCounter {
         }
         if (p.scoring) return;                    // the goal's points come next: keep the chain for them
         if (!p.playing) { breakChain(); return; }  // round over, round start, pause
-        if (p.team < 0) {  // in the air or loose: the chain waits, and the bounces are watched
-            if (!loose) { loose = true; looseFirst = looseMax = p.bounces; }
+        if (p.team < 0) {  // in the air or loose: the chain waits, and the bounces and the time are watched
+            if (!loose) { loose = true; looseAt = t; looseFirst = looseMax = p.bounces; }
             else looseMax = std::max(looseMax, p.bounces);
             return;
         }
         // Whether Echo resets the count when the disc is thrown or when it is grabbed, a rise
-        // while it was loose is a bounce. Seen in nobody's hand (under 0.1 s): no bounce.
-        bool bouncedFlight = loose && looseFirst >= 0 && looseMax > looseFirst;
+        // while it was loose is a bounce. Seen in nobody's hand (under 0.1 s): no bounce, no time.
+        int bounces = loose && looseFirst >= 0 && looseMax > looseFirst ? looseMax - looseFirst : 0;
+        double seconds = loose ? t - looseAt : 0;
         loose = false;
         if (p.team != team) {
             breakChain();
@@ -238,15 +246,20 @@ struct PassCounter {
             holder = p.holder;
             return;
         }
-        if (p.holder != holder) {
-            holder = p.holder;
-            if (bouncedFlight) { bounced++; return; }
-            passes++;
-            popAt = t;
+        if (p.holder == holder) return;  // the same player again (a drop, their own throw): nothing
+        holder = p.holder;
+        lastSeconds = seconds;
+        lastBounces = bounces;
+        if (bounces > rules.maxBounces || seconds > rules.maxSeconds) {  // no pass: the chain starts over here
+            if (bounces > rules.maxBounces) bounced++; else slow++;
+            passes = 0;
+            popAt = -1;
+            return;
         }
+        passes++;
+        popAt = t;
     }
 };
-
 struct PassView {
     enum Kind { None, Plus, Count, Goal } kind = None;
     int number = 0, team = -1;

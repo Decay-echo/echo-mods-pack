@@ -1084,7 +1084,6 @@ private:
                 iniWrite(hud, L"passes", L"enabled", v != 0 ? L"1" : L"0");
                 if (v != 0) iniWrite(hud, L"passes", L"teams", v == 1 ? L"mine" : L"both");
             };
-            p.options.push_back(passes);
             Option gauges{L"Gauges", L"The old thruster rings, speed rings and 7 s top speed", Kind::Toggle};
             gauges.get = [hud] {
                 return iniFloat(hud, L"thrusters", L"rings", 0) != 0 || iniFloat(hud, L"speed", L"ring", 0) != 0 ||
@@ -1098,6 +1097,21 @@ private:
             };
             p.options.push_back(gauges);
             pages_.push_back(p);
+
+            Page pp{L"PASSES"};
+            pp.options.push_back(passes);
+            Option bounces{L"Bounce passes", L"How often the disc may bounce on its way and still be a pass (1: a bounce pass counts)", Kind::Choice};
+            bounces.choices = {L"NO BOUNCE", L"1 BOUNCE", L"2 BOUNCES", L"3 BOUNCES"};
+            bounces.get = [hud] { return std::clamp(iniFloat(hud, L"passes", L"max_bounces", 1), 0.f, 3.f); };
+            bounces.set = [hud](float v) { iniWrite(hud, L"passes", L"max_bounces", num(v, L"%.0f")); };
+            pp.options.push_back(bounces);
+            pp.options.push_back(slider(L"Pass time limit", L"Seconds the disc may be loose and the catch still be a pass",
+                                        hud, L"passes", L"max_seconds", 1, 15, .5f, 5, L"%.1f s"));
+            pp.options.push_back(slider(L"Count from", L"The count itself shows from this many passes (\"+1\" before that)",
+                                        hud, L"passes", L"count_from", 1, 20, 1, 6, L"%.0f"));
+            pp.options.push_back(slider(L"Size", L"The counter's size", hud, L"passes", L"size_px", 10, 60, 2, 26, L"%.0f px"));
+            pp.footer = L"A slower catch, or more bounces, is no pass: the chain starts over there.";
+            pages_.push_back(pp);
         }
 
         Page screen{L"SCREEN"};

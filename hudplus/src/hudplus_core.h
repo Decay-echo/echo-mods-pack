@@ -82,6 +82,8 @@ struct Settings {
     int passCountFrom = 6;
     float passPx = 26.f;          // box height, canvas px (three times as wide)
     float passY = 0.075f;         // metres above eye level, at the HUD's distance
+    float passMaxSeconds = 5.f;   // a pass must reach the teammate within this (loose time)
+    int passMaxBounces = 1;       // and bounce at most this often on the way (1: a bounce pass counts)
 };
 
 inline float clamp01(float v) { return v < 0 ? 0 : v > 1 ? 1 : v; }

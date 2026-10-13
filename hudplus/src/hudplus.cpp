@@ -322,18 +322,23 @@ DWORD WINAPI pollPasses(LPVOID) {
             answering = got;
             logf(got ? "pass counter: Echo's API answers" : "pass counter: no answer from Echo's API (not in a match, or API access off)");
         }
-        int bouncedBefore, bouncedAfter, passesAfter;
+        int missedBefore, missedAfter, bounces;
+        double seconds;
+        PassRules rules{double(settings.passMaxSeconds), settings.passMaxBounces};
         {
             std::lock_guard<std::mutex> g(stateLock);
-            bouncedBefore = state.passes.bounced;
+            state.passes.rules = rules;
+            missedBefore = state.passes.bounced + state.passes.slow;
             state.passes.update(p, now());
-            bouncedAfter = state.passes.bounced;
-            passesAfter = state.passes.passes;
+            missedAfter = state.passes.bounced + state.passes.slow;
+            bounces = state.passes.lastBounces;
+            seconds = state.passes.lastSeconds;
             state.apiTeam = p.myTeam;
         }
-        static int bounceLogBudget = 20;
-        if (bouncedAfter != bouncedBefore && bounceLogBudget-- > 0)
-            logf("pass counter: %s caught it after a bounce: not counted (chain stays at %d)", p.holder.c_str(), passesAfter);
+        static int missLogBudget = 30;
+        if (missedAfter != missedBefore && missLogBudget-- > 0)
+            logf("pass counter: %s caught it after %d bounce(s) and %.1f s loose: no pass (the limit is %d and %.1f s); the chain starts over",
+                 p.holder.c_str(), bounces, seconds, rules.maxBounces, rules.maxSeconds);
         Sleep(got ? 100 : 1000);  // 10 a second in a match (a catch lasts longer); once a second otherwise
     }
 }
@@ -983,6 +988,8 @@ void readSettings(const std::wstring& ini) {
     s.passCountFrom = int(f(L"passes", L"count_from", float(s.passCountFrom), 1.f, 99.f));
     s.passPx = f(L"passes", L"size_px", s.passPx, 4.f, 200.f);
     s.passY = f(L"passes", L"y_m", s.passY, -1.f, 1.f);
+    s.passMaxSeconds = f(L"passes", L"max_seconds", s.passMaxSeconds, 0.5f, 60.f);
+    s.passMaxBounces = int(f(L"passes", L"max_bounces", float(s.passMaxBounces), 0.f, 9.f));
 }
 
 void loadDigits(const std::wstring& path) {
