@@ -48,15 +48,72 @@ CORE_URL = 'https://buildbot.libretro.com/nightly/windows/x86_64/latest/{}_libre
 PRBOOM_WAD = 'https://github.com/libretro/libretro-prboom/raw/master/prboom.wad'
 
 
-def fetch(url, dest: Path):
-    if dest.exists():
-        return dest
+SEVENZIP_R = 'https://www.7-zip.org/a/7zr.exe'  # 7-Zip's small console extractor, if Windows' tar can't read an archive
+MAGIC = {'.7z': b'7z\xbc\xaf\x27\x1c', '.zip': b'PK'}
+
+
+def looks_whole(path: Path, expected_size=None):
+    """A download that is the size the server said and starts like its kind of file (a cut-off
+    or failed download, or an error page saved under the name, is neither)."""
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return False
+    if expected_size and size != expected_size:
+        return False
+    magic = MAGIC.get(path.suffix.lower())
+    if magic:
+        with open(path, 'rb') as f:
+            if f.read(len(magic)) != magic:
+                return False
+    return size > 0
+
+
+def fetch(url, dest: Path, attempts=3):
+    """Downloads to dest unless a whole copy is there. A cut-off or broken download (also one
+    left by an earlier run) is thrown away and fetched again, a few times."""
     dest.parent.mkdir(parents=True, exist_ok=True)
-    print('downloading', url)
-    with urllib.request.urlopen(url) as r, open(dest.with_suffix(dest.suffix + '.part'), 'wb') as f:
-        shutil.copyfileobj(r, f)
-    dest.with_suffix(dest.suffix + '.part').rename(dest)
-    return dest
+    part = dest.with_suffix(dest.suffix + '.part')
+    for attempt in range(1, attempts + 1):
+        expected = None
+        if dest.exists():
+            if looks_whole(dest):
+                return dest
+            print(f'{dest.name} is not a whole file; downloading it again')
+            dest.unlink()
+        print('downloading', url)
+        try:
+            with urllib.request.urlopen(url) as r, open(part, 'wb') as f:
+                length = r.headers.get('Content-Length')
+                expected = int(length) if length and length.isdigit() else None
+                shutil.copyfileobj(r, f)
+            if not looks_whole(part, expected):
+                raise OSError(f'got {part.stat().st_size} bytes' + (f', expected {expected}' if expected else '') + ' (not a whole file)')
+            part.rename(dest)
+            return dest
+        except Exception as e:  # noqa: BLE001 - any network or disk trouble: say so and retry
+            part.unlink(missing_ok=True)
+            print(f'  attempt {attempt} of {attempts} failed: {e}')
+            if attempt == attempts:
+                raise SystemExit(f'Could not download {url}. Check your internet connection (or a firewall / antivirus) and run this again.')
+
+
+def extract_7z(archive: Path, into: Path):
+    """Windows' tar (bsdtar) reads 7z; if it refuses (an older Windows, or an archive it can't
+    read), 7-Zip's own small extractor is fetched and used."""
+    into.mkdir(parents=True, exist_ok=True)
+    tar = Path(r'C:\Windows\System32\tar.exe')
+    if tar.exists():
+        r = subprocess.run([str(tar), '-xf', str(archive), '-C', str(into)], capture_output=True, text=True)
+        if r.returncode == 0:
+            return
+        print(f'tar could not unpack {archive.name}: {(r.stderr or r.stdout).strip()[:300]}')
+    sevenzr = fetch(SEVENZIP_R, DL / '7zr.exe')
+    print('unpacking with 7-Zip (7zr.exe)')
+    r = subprocess.run([str(sevenzr), 'x', str(archive), f'-o{into}', '-y'], capture_output=True, text=True)
+    if r.returncode != 0:
+        raise SystemExit(f'7-Zip could not unpack {archive.name} either: {(r.stderr or r.stdout).strip()[:300]}\n'
+                         f'Delete {archive} and run this again (it is downloaded fresh).')
 
 
 def git(*args, cwd=None):
@@ -105,10 +162,16 @@ def main():
     ra = fetch(RETROARCH, DL / 'RetroArch.7z')
     if not (APPS / 'retroarch/retroarch.exe').exists():
         tmp = APPS / 'retroarch_tmp'
-        tmp.mkdir(exist_ok=True)
-        # Windows' bsdtar reads 7z (including the BCJ2 filter py7zr lacks).
-        subprocess.run([r'C:\Windows\System32\tar.exe', '-xf', str(ra), '-C', str(tmp)], check=True)
-        shutil.move(str(tmp / 'RetroArch-Win64'), str(APPS / 'retroarch'))
+        shutil.rmtree(tmp, ignore_errors=True)  # half of an earlier try
+        try:
+            extract_7z(ra, tmp)
+        except SystemExit:
+            ra.unlink(missing_ok=True)  # a broken archive is not kept for the next run
+            raise
+        inner = tmp / 'RetroArch-Win64'
+        if not (inner / 'retroarch.exe').exists():
+            raise SystemExit(f'{ra.name} did not contain RetroArch-Win64\\retroarch.exe')
+        shutil.move(str(inner), str(APPS / 'retroarch'))
         shutil.rmtree(tmp, ignore_errors=True)
     # A button held on the tablet must stay held in RetroArch (tools/patch_retroarch.py explains).
     sys.path.insert(0, str(ROOT / 'tools'))
