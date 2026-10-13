@@ -86,7 +86,7 @@ struct Settings {
     // Discord (from the arcade host's block): the voice call's people above the speeds, the
     // newest message's sender with +N at the top
     bool discord = true;
-    float discordPx = 36.f;       // the voice row's height, readout px (avatars a little smaller)
+    float discordPx = 13.5f;       // the voice row's height, readout px (avatars a little smaller; half of the first cut, by request)
     float discordUpPx = 6.f;      // gap between the row and the speeds box, px
     float badgeScale = 1.5f;      // the message badge: the pass counter's spot, this much bigger
     float badgeSeconds = 3.f;     // how long it stays after a message (the pass counter waits)

@@ -10,6 +10,7 @@
 #include "mod_settings.h"
 #include "touchpad.h"
 #include <winrt/base.h>
+#include <winrt/Windows.Foundation.Collections.h>
 #include <winrt/Windows.Data.Json.h>
 #include <ctime>
 #include <algorithm>
@@ -43,6 +44,7 @@ const Rect DOCK_BUTTON{744, 12, 1008, 64};                  // launcher header
 const Rect FREEZE_BUTTON{470, 12, 734, 64};                 // launcher header
 const Rect MENU_DOCK_BUTTON{312, 334, 712, 396};            // in-app menu
 const Rect MENU_FREEZE_BUTTON{312, 408, 712, 470};          // in-app menu
+const Rect MENU_HOME_BUTTON{312, 482, 712, 544};            // in-app menu: the launcher, the app kept running
 constexpr uint64_t SHOT_PRESS_MS = 90;                      // a shot holds its tap this long
 const Rect PAGE_UP{916, 84, 1012, 298}, PAGE_DOWN{916, 306, 1012, 520};
 constexpr int ROWS_PER_PAGE = 6, ROW_Y = 84, ROW_H = 72;
@@ -156,6 +158,7 @@ public:
             pollAds(now);
             pollWatch();
             pollDiscord(now);
+            pollBackground();
             share_.audioSource(shareAudioPid());
             pollDock();
             autoDock(now);
@@ -250,6 +253,13 @@ private:
         pressed_ = -1;
         if (!app.missing.empty()) { message_ = app.title + L": " + app.missing; return; }
         message_.clear();
+        if (background_ && session_.alive() && sameApp(app, backgroundApp_)) {  // back to the running app
+            background_ = false;
+            current_ = backgroundApp_;
+            mode_ = Mode::Running;
+            resetInput();
+            return;
+        }
         current_ = app;
         if (app.id == AppId::Movies) { openMovies(); return; }
         if (app.id == AppId::Plex) { openPlex(); return; }
@@ -1028,7 +1038,7 @@ private:
         hostLog("dock: asked to %s", dock ? "dock" : "undock");
     }
     bool docked() const { return shared_->dockState == arcade::Docked; }
-    bool dockPending() const { return dockAsked_ && shared_->dockDone != dockAsked_; }
+    bool dockPending() const { return dockAsked_ && shared_->dockDone != dockAsked_ && GetTickCount64() - dockAskedAt_ < 6000; }
     void pollDock() {
         LONG done = shared_->dockDone;
         if (done == dockSeen_) return;
@@ -1050,6 +1060,11 @@ private:
     // AUTO DOCK: while on, the arcade goes on the lobby poster nearest you, and every poster it
     // has been on stays on (also after a match: the plugin puts it back when the lobby loads).
     void autoDock(uint64_t now) {
+        if (shared_->levelSerial != dockLevel_) {  // a new level (an arena, the lobby): the posters are new, ask right away
+            dockLevel_ = shared_->levelSerial;
+            lastAutoDock_ = 0;
+            dockAsked_ = 0;
+        }
         if (!autoDock_ || dockPending() || now - lastAutoDock_ < 2000) return;
         lastAutoDock_ = now;
         requestDock(true, true);
@@ -1907,6 +1922,27 @@ private:
         else if (tapped(t, 201, QUIT_BUTTON)) { session_.quit(); message_ = L"Closing " + current_.title + L"..."; }
         else if (tapped(t, 202, MENU_DOCK_BUTTON)) dockTapped();
         else if (tapped(t, 203, MENU_FREEZE_BUTTON)) freezeTapped();
+        else if (tapped(t, 204, MENU_HOME_BUTTON)) goHome();
+    }
+    // HOME: back to the launcher with the app still running (a video keeps playing; Minecraft
+    // sleeps until you come back). Its tile says so and brings it back; starting another app
+    // ends it.
+    void goHome() {
+        if (freeze_) stopFreeze(L"");
+        background_ = true;
+        backgroundApp_ = current_;
+        toLauncher();
+        message_ = current_.title + L" keeps running: its tile brings it back.";
+    }
+    bool sameApp(const AppInfo& a, const AppInfo& b) const { return a.id == b.id && a.rom == b.rom && a.title == b.title; }
+    void pollBackground() {
+        if (!background_) return;
+        if (!session_.alive()) {
+            background_ = false;
+            if (mode_ == Mode::Launcher || mode_ == Mode::Browse) message_ = backgroundApp_.title + L" closed.";
+            lightGun_.appClosed();
+            finishPlex();
+        }
     }
 
     void playerTouch(const Touch& t) {
@@ -2143,6 +2179,159 @@ private:
         lastMediaPage_ = 0;
         resetInput();
     }
+    // ---- album art for the listening mode: the real cover from iTunes' catalogue (600 px,
+    // no video bars) for the title and artist, else the media session's own picture with
+    // its side bars cut off (YouTube's auto-made videos pad the cover with a colour).
+    static std::wstring cleanMediaText(std::wstring s) {
+        for (;;) {  // "(Official Video)", "[Lyrics]"...
+            size_t a = s.find_first_of(L"([");
+            if (a == std::wstring::npos) break;
+            size_t b = s.find_first_of(L")]", a);
+            if (b == std::wstring::npos) { s.erase(a); break; }
+            s.erase(a, b - a + 1);
+        }
+        static const wchar_t* const drop[] = {L" - Topic", L"- Topic", L"VEVO", L"Official", L"official", L"ft.", L"feat."};
+        for (auto d : drop) { size_t p; while ((p = s.find(d)) != std::wstring::npos) s.erase(p, wcslen(d)); }
+        std::wstring out;
+        for (wchar_t c : s) { if (c == L' ' && (out.empty() || out.back() == L' ')) continue; out += c; }
+        while (!out.empty() && out.back() == L' ') out.pop_back();
+        return out;
+    }
+    static std::string urlEncodeUtf8(const std::wstring& w) {
+        std::string s = narrowUtf8(w), out;
+        for (unsigned char c : s) {
+            if (isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~') out += char(c);
+            else { char b[4]; sprintf_s(b, "%%%02X", c); out += b; }
+        }
+        return out;
+    }
+    static std::shared_ptr<const SharePicture> cropBars(std::shared_ptr<const SharePicture> pic) {
+        if (!pic || pic->w < 16 || pic->h < 8) return pic;
+        auto px = [&](int x, int y) { return pic->bgra.data() + (size_t(y) * pic->w + x) * 4; };
+        auto similar = [](const uint8_t* a, const uint8_t* b) { return abs(a[0] - b[0]) + abs(a[1] - b[1]) + abs(a[2] - b[2]) < 60; };
+        auto bar = [&](int x, const uint8_t* ref) {
+            int bad = 0, n = 0;
+            for (int y = 0; y < pic->h; y += 2) { n++; if (!similar(px(x, y), ref)) bad++; }
+            return bad * 12 < n;
+        };
+        int left = 0, right = pic->w - 1;
+        while (left < pic->w / 2 && bar(left, px(0, 0))) left++;
+        while (right > pic->w / 2 && bar(right, px(pic->w - 1, 0))) right--;
+        if (left < 3 && right > pic->w - 4) return pic;
+        auto out = std::make_shared<SharePicture>();
+        out->w = right - left + 1;
+        out->h = pic->h;
+        out->bgra.resize(size_t(out->w) * out->h * 4);
+        for (int y = 0; y < pic->h; y++) memcpy(out->bgra.data() + size_t(y) * out->w * 4, px(left, y), size_t(out->w) * 4);
+        return out;
+    }
+    static std::shared_ptr<const SharePicture> itunesArt(const std::wstring& title, const std::wstring& artist) {
+        std::wstring t = cleanMediaText(title), a = cleanMediaText(artist);
+        if (t.empty()) return nullptr;
+        auto body = httpGetBytes(L"https://itunes.apple.com/search?entity=song&limit=6&term=" + widenUtf8(urlEncodeUtf8(a + L" " + t)));
+        if (body.empty()) return nullptr;
+        std::wstring url;
+        try {
+            winrt::Windows::Data::Json::JsonObject o;
+            if (!winrt::Windows::Data::Json::JsonObject::TryParse(widenUtf8(std::string(body.begin(), body.end())), o)) return nullptr;
+            auto results = o.GetNamedArray(L"results", nullptr);
+            if (!results) return nullptr;
+            std::wstring firstWord = a.substr(0, a.find(L' '));
+            for (auto& c : firstWord) c = wchar_t(towlower(c));
+            std::wstring lowTitle = t;
+            for (auto& c : lowTitle) c = wchar_t(towlower(c));
+            for (auto v : results) {
+                if (v.ValueType() != winrt::Windows::Data::Json::JsonValueType::Object) continue;
+                auto r = v.GetObject();
+                std::wstring artistName = std::wstring(r.GetNamedString(L"artistName", L"")), trackName = std::wstring(r.GetNamedString(L"trackName", L"")), art = std::wstring(r.GetNamedString(L"artworkUrl100", L""));
+                for (auto& c : artistName) c = wchar_t(towlower(c));
+                for (auto& c : trackName) c = wchar_t(towlower(c));
+                bool artistOk = firstWord.empty() || artistName.find(firstWord) != std::wstring::npos;
+                bool titleOk = trackName.find(lowTitle) != std::wstring::npos || lowTitle.find(trackName) != std::wstring::npos;
+                if (!art.empty() && (artistOk || titleOk)) { url = art; break; }
+            }
+        } catch (...) { return nullptr; }
+        if (url.empty()) return nullptr;
+        size_t p = url.find(L"100x100");
+        if (p != std::wstring::npos) url.replace(p, 7, L"600x600");
+        auto bytes = httpGetBytes(url);
+        if (bytes.empty()) return nullptr;
+        auto pic = decodeImage(bytes.data(), bytes.size());
+        return pic && pic->w ? pic : nullptr;
+    }
+    // A soft, dark wash of the cover's colours for the whole screen: a 24 x 14 average, blown up.
+    static std::shared_ptr<const SharePicture> makeBackdrop(const SharePicture* art) {
+        auto out = std::make_shared<SharePicture>();
+        out->w = SCREEN_W;
+        out->h = SCREEN_H;
+        out->bgra.assign(size_t(SCREEN_W) * SCREEN_H * 4, 0);
+        const int GW = 24, GH = 14;
+        float grid[GH][GW][3] = {};
+        if (art && art->w && art->h) {
+            for (int gy = 0; gy < GH; gy++)
+                for (int gx = 0; gx < GW; gx++) {
+                    int x0 = gx * art->w / GW, x1 = std::max(x0 + 1, (gx + 1) * art->w / GW), y0 = gy * art->h / GH, y1 = std::max(y0 + 1, (gy + 1) * art->h / GH);
+                    double s[3] = {0, 0, 0};
+                    int n = 0;
+                    for (int y = y0; y < y1; y++)
+                        for (int x = x0; x < x1; x++) { const uint8_t* p = art->bgra.data() + (size_t(y) * art->w + x) * 4; s[0] += p[0]; s[1] += p[1]; s[2] += p[2]; n++; }
+                    for (int c = 0; c < 3; c++) grid[gy][gx][c] = float(s[c] / n);
+                }
+        } else {
+            for (int gy = 0; gy < GH; gy++) for (int gx = 0; gx < GW; gx++) { grid[gy][gx][0] = 40; grid[gy][gx][1] = 30; grid[gy][gx][2] = 30; }
+        }
+        for (int y = 0; y < SCREEN_H; y++) {
+            float fy = float(y) * (GH - 1) / (SCREEN_H - 1);
+            int iy = int(fy), iy1 = std::min(GH - 1, iy + 1);
+            float ty = fy - iy;
+            for (int x = 0; x < SCREEN_W; x++) {
+                float fx = float(x) * (GW - 1) / (SCREEN_W - 1);
+                int ix = int(fx), ix1 = std::min(GW - 1, ix + 1);
+                float tx = fx - ix;
+                uint8_t* o = out->bgra.data() + (size_t(y) * SCREEN_W + x) * 4;
+                for (int c = 0; c < 3; c++) {
+                    float v = (grid[iy][ix][c] * (1 - tx) + grid[iy][ix1][c] * tx) * (1 - ty) + (grid[iy1][ix][c] * (1 - tx) + grid[iy1][ix1][c] * tx) * ty;
+                    o[c] = uint8_t(std::min(255.f, v * 0.34f));
+                }
+                o[3] = 255;
+            }
+        }
+        return out;
+    }
+    void renderMarquee(const std::wstring& text) {
+        marquee_.clear(rgb(0, 0, 0));
+        marqueeWidth_ = 0;
+        if (text.empty()) return;
+        marquee_.text({0, 0, marquee_.width(), marquee_.height()}, text, 36, rgb(255, 255, 255), true, 0);
+        const uint32_t* px = marquee_.pixels();
+        for (int x = marquee_.width() - 1; x >= 0 && !marqueeWidth_; x--)
+            for (int y = 0; y < marquee_.height(); y++)
+                if ((px[size_t(y) * marquee_.width() + x] & 0xff) > 40) { marqueeWidth_ = x + 1; break; }
+    }
+    // The strip (white text on black) over the screen with `opacity`, moving right: its
+    // text repeats every (width + gap) px; `yTop` in tablet px.
+    void blendMarquee(int yTop, int offset, float opacity) {
+        if (marqueeWidth_ <= 0) return;
+        Canvas& c = canvas_;
+        float k = float(c.width()) / SCREEN_W;
+        int period = marqueeWidth_ + 180;
+        const uint32_t* src = marquee_.pixels();
+        uint32_t* dst = c.pixels();
+        int y0 = std::max(0, int(yTop * k)), y1 = std::min(c.height(), int((yTop + marquee_.height()) * k));
+        for (int y = y0; y < y1; y++) {
+            int sy = std::clamp(int(y / k) - yTop, 0, marquee_.height() - 1);
+            for (int x = 0; x < c.width(); x++) {
+                int sx = ((int(x / k) - offset) % period + period) % period;
+                if (sx >= marqueeWidth_) continue;
+                int lum = int(src[size_t(sy) * marquee_.width() + sx] & 0xff);
+                if (lum < 12) continue;
+                float a = opacity * lum / 255.f;
+                uint32_t& d = dst[size_t(y) * c.width() + x];
+                int r = int(((d >> 16) & 255) * (1 - a) + 255 * a), g = int(((d >> 8) & 255) * (1 - a) + 255 * a), b = int((d & 255) * (1 - a) + 255 * a);
+                d = 0xff000000u | (uint32_t(r) << 16) | (uint32_t(g) << 8) | uint32_t(b);
+            }
+        }
+    }
     void pollMedia(uint64_t now) {
         if (mode_ != Mode::Media || mediaPageBusy_ || now - lastMediaPage_ < 1000) return;
         lastMediaPage_ = now;
@@ -2152,18 +2341,30 @@ private:
             std::wstring app;
             MediaInfo peek = mediaNowPlaying(app, false);
             std::wstring key = peek.valid ? peek.title + L"|" + peek.artist + L"|" + app : L"";
-            std::shared_ptr<const SharePicture> art;
+            std::shared_ptr<const SharePicture> art, back;
             bool newArt = key != artKey;
-            if (newArt && peek.valid) {  // the album art, once per track
-                MediaInfo withArt = mediaNowPlaying(app, true);
-                if (!withArt.art.empty()) art = decodeImage(withArt.art.data(), withArt.art.size());
+            if (newArt && peek.valid) {  // the cover, once per track: iTunes first, the session's picture second
+                art = itunesArt(peek.title, peek.artist);
+                if (!art) {
+                    MediaInfo withArt = mediaNowPlaying(app, true);
+                    if (!withArt.art.empty()) art = cropBars(decodeImage(withArt.art.data(), withArt.art.size()));
+                    if (art && !art->w) art = nullptr;
+                }
+                back = makeBackdrop(art.get());
+                hostLog("media: %ls - %ls: cover %s", peek.artist.c_str(), peek.title.c_str(), art ? (art->w >= 400 ? "from iTunes" : "from the player") : "none");
             }
             float volume = masterVolume();
             bool muted = masterMuted();
             std::lock_guard<std::mutex> lock(pendingLock_);
-            pending_.push_back([this, peek, app, volume, muted, key, newArt, art] {
+            pending_.push_back([this, peek, app, volume, muted, key, newArt, art, back] {
                 mediaNow_ = peek; mediaApp_ = app; mediaVolume_ = volume; mediaMuted_ = muted; mediaPageBusy_ = false;
-                if (newArt) { mediaArtKey_ = key; mediaArt_ = (art && art->w) ? art : nullptr; }
+                if (newArt) {
+                    mediaArtKey_ = key;
+                    mediaArt_ = art;
+                    mediaBack_ = back;
+                    std::wstring artist = cleanMediaText(peek.artist), title = cleanMediaText(peek.title);
+                    renderMarquee(peek.valid ? (artist.empty() ? title : artist + L"   \x2022   " + title) : L"");
+                }
             });
         });
     }
@@ -2191,18 +2392,13 @@ private:
         });
     }
     void drawMedia() {
-        if (mediaListen_) {  // listening mode: the album art, the track, nothing else
-            canvas_.clear(rgb(6, 6, 10));
-            if (mediaArt_) canvas_.blit(mediaArt_->bgra.data(), mediaArt_->w, mediaArt_->h, mediaArt_->w * 4, {0, 0, SCREEN_W, SCREEN_H - 90});
+        if (mediaListen_) {  // listening mode: the cover front and centre, a soft wash of its colours around it, the track scrolling by
+            if (mediaBack_) canvas_.blit(mediaBack_->bgra.data(), mediaBack_->w, mediaBack_->h, mediaBack_->w * 4, {0, 0, SCREEN_W, SCREEN_H});
+            else canvas_.clear(rgb(6, 6, 10));
+            if (mediaArt_) canvas_.blit(mediaArt_->bgra.data(), mediaArt_->w, mediaArt_->h, mediaArt_->w * 4, {0, 0, SCREEN_W, SCREEN_H});
             else canvas_.text({0, 150, SCREEN_W, 330}, L"\x266B", 150, rgb(60, 70, 100));
-            canvas_.fill({0, SCREEN_H - 90, SCREEN_W, SCREEN_H}, rgb(10, 10, 16));
-            if (mediaNow_.valid) {
-                canvas_.text({30, SCREEN_H - 86, SCREEN_W - 30, SCREEN_H - 46}, mediaNow_.title.empty() ? L"(no title)" : mediaNow_.title, 28, rgb(245, 245, 250), true, 0);
-                canvas_.text({30, SCREEN_H - 46, SCREEN_W - 30, SCREEN_H - 12}, mediaNow_.artist + (mediaNow_.playing ? L"" : L"   (paused)"), 21, rgb(170, 180, 200), false, 0);
-            } else {
-                canvas_.text({30, SCREEN_H - 70, SCREEN_W - 30, SCREEN_H - 30}, L"Nothing is playing", 24, rgb(170, 180, 200), false, 0);
-            }
-            canvas_.text({SCREEN_W - 260, SCREEN_H - 40, SCREEN_W - 14, SCREEN_H - 10}, L"tap for the controls", 16, rgb(100, 110, 130), false, 2);
+            if (!mediaNow_.valid) canvas_.text({0, SCREEN_H - 70, SCREEN_W, SCREEN_H - 30}, L"Nothing is playing", 24, rgb(200, 205, 220), false);
+            else blendMarquee(SCREEN_H - 84, int((GetTickCount64() / 12) % 100000), mediaNow_.playing ? 0.55f : 0.3f);
             return;
         }
         canvas_.clear(rgb(14, 16, 24));
@@ -2240,6 +2436,7 @@ private:
         return n.empty() ? L"a friend" : n;
     }
     std::wstring tileSub(const AppInfo& a) const {
+        if (background_ && session_.alive() && sameApp(a, backgroundApp_)) return L"RUNNING - tap to go back to it";
         if (a.id == AppId::Split && share_.running() && share_.split()) {
             int n = share_.viewers();
             return L"ON - " + std::to_wstring(n) + (n == 1 ? L" friend connected" : L" friends connected") + L" - tap to look";
@@ -2881,7 +3078,8 @@ private:
         button(QUIT_BUTTON, L"QUIT TO LAUNCHER", pressed_ == 201, rgb(130, 40, 40), 32);
         button(MENU_DOCK_BUTTON, dockLabel(), pressed_ == 202, docked() ? rgb(40, 110, 60) : rgb(50, 58, 84), 28);
         button(MENU_FREEZE_BUTTON, freezeLabel(), pressed_ == 203, freeze_ ? rgb(40, 110, 60) : rgb(50, 58, 84), 28);
-        if (!message_.empty()) canvas_.text({0, 486, SCREEN_W, 540}, message_, 22, rgb(255, 220, 200));
+        button(MENU_HOME_BUTTON, L"HOME  (keeps it running)", pressed_ == 204, rgb(50, 58, 84), 26);
+        if (!message_.empty()) canvas_.text({0, 548, SCREEN_W, 574}, message_, 18, rgb(255, 220, 200));
     }
 
     bool hqWanted() const { return posterHq_ && shared_->dockState == arcade::Docked; }  // only while docked (the tablet never needs it)
@@ -2964,6 +3162,9 @@ private:
     Canvas split_;                      // the split screen's picture (composeSplit)
     uint64_t splitBarUntil_ = 0;
     bool landing_ = false;              // tapped(): this touch is a new poke (see onTouch)
+    bool background_ = false;           // HOME: the app runs on behind the launcher
+    AppInfo backgroundApp_{};
+    LONG dockLevel_ = -1;               // the level the last auto dock was asked in
     int heldCount_ = 0;                 // touch cells down right now
     uint64_t firedAt_ = 0, lastTouchAt_ = 0;
     std::vector<uint8_t> upPixels_;     // my app's picture for a friend's split screen
@@ -2976,6 +3177,9 @@ private:
     float mediaVolume_ = -1;
     bool mediaMuted_ = false, mediaPageBusy_ = false, mediaListen_ = false;
     std::shared_ptr<const SharePicture> mediaArt_;  // the album art of the current track
+    std::shared_ptr<const SharePicture> mediaBack_; // the wash behind it
+    Canvas marquee_{2048, 72, 1.f};                 // "artist - song", white on black, for the scrolling line
+    int marqueeWidth_ = 0;
     std::wstring mediaArtKey_;
     uint64_t ytPollSerial_ = 0;         // the sign-in poll that is current (an older one gives up)
     uint64_t lastMediaPage_ = 0;
