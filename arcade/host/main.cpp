@@ -1389,7 +1389,7 @@ private:
         auto& s = screens_.back();
         int pages = std::max(1, (int(s.entries.size()) + ROWS_PER_PAGE - 1) / ROWS_PER_PAGE);
         if (tapped(t, 100, BACK_BUTTON)) { back(); return; }
-        if (tapped(t, 501, DOCK_BUTTON)) { freezeTapped(); return; }  // FREEZE sits where DOCK does on the launcher
+        if (minecraftChooser() && tapped(t, 501, DOCK_BUTTON)) { freezeTapped(); return; }  // FREEZE on the Minecraft page only
         if (tapped(t, 101, PAGE_UP)) { s.page = std::max(0, s.page - 1); return; }
         if (tapped(t, 102, PAGE_DOWN)) { s.page = std::min(pages - 1, s.page + 1); return; }
         for (int i = 0; i < ROWS_PER_PAGE; i++) {
@@ -1607,8 +1607,10 @@ private:
         auto& s = screens_.back();
         canvas_.clear(rgb(14, 16, 24));
         header(s.title, true);
-        canvas_.fill({730, 0, SCREEN_W, 76}, rgb(22, 26, 40));  // room for FREEZE
-        button(DOCK_BUTTON, freezeLabel(), pressed_ == 501, freeze_ ? rgb(40, 110, 60) : rgb(50, 58, 84), 22);
+        if (minecraftChooser()) {  // FREEZE here: hold still, pick the launcher, the game gets the controllers
+            canvas_.fill({730, 0, SCREEN_W, 76}, rgb(22, 26, 40));
+            button(DOCK_BUTTON, freezeLabel(), pressed_ == 501, freeze_ ? rgb(40, 110, 60) : rgb(50, 58, 84), 22);
+        }
         int pages = std::max(1, (int(s.entries.size()) + ROWS_PER_PAGE - 1) / ROWS_PER_PAGE);
         for (int i = 0; i < ROWS_PER_PAGE; i++) {
             size_t index = size_t(s.page * ROWS_PER_PAGE + i);
