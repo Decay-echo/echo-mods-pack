@@ -1346,6 +1346,7 @@ private:
         posterHq_ = _wcsicmp(iniText(t, L"poster", L"quality", L"normal").c_str(), L"high") == 0;
         sidesOn_ = GetPrivateProfileIntW(L"sides", L"enabled", 1, t.c_str()) != 0;
         config_.minecraftSleep = GetPrivateProfileIntW(L"cpu", L"minecraft_sleep", 0, t.c_str()) != 0;
+        config_.minecraftMinimize = GetPrivateProfileIntW(L"minecraft", L"minimize_hidden", 1, t.c_str()) != 0;
         bool sharing = GetPrivateProfileIntW(L"share", L"tiles", 1, t.c_str()) != 0;
         if (sharing != config_.sharing) {
             config_.sharing = sharing;
@@ -1414,10 +1415,15 @@ private:
         sides.get = [this] { return sidesOn_ ? 1.f : 0.f; };
         sides.set = [this, tweaks](float v) { sidesOn_ = v != 0; iniWrite(tweaks, L"sides", L"enabled", sidesOn_ ? L"1" : L"0"); };
         tablet.options.push_back(sides);
-        Option mcSleep{L"Minecraft sleeps when hidden", L"Off: hidden Minecraft runs on at the lowest priority (servers keep you). On: frozen outright, no CPU at all, for the smallest PCs", Kind::Toggle};
-        mcSleep.get = [this] { return config_.minecraftSleep ? 1.f : 0.f; };
-        mcSleep.set = [this, tweaks](float v) { iniWrite(tweaks, L"cpu", L"minecraft_sleep", v != 0 ? L"1" : L"0"); loadSettings(); };
-        tablet.options.push_back(mcSleep);
+        Option hidden{L"Hidden Minecraft", L"Not on the tablet: runs on at low priority; MINIMIZED also minimizes its window (10 fps on 1.21.2+); ASLEEP freezes it (servers drop you)", Kind::Choice};
+        hidden.choices = {L"LOW PRIORITY", L"MINIMIZED", L"ASLEEP"};
+        hidden.get = [this] { return config_.minecraftSleep ? 2.f : config_.minecraftMinimize ? 1.f : 0.f; };
+        hidden.set = [this, tweaks](float v) {
+            iniWrite(tweaks, L"cpu", L"minecraft_sleep", v == 2 ? L"1" : L"0");
+            iniWrite(tweaks, L"minecraft", L"minimize_hidden", v == 1 ? L"1" : L"0");
+            loadSettings();
+        };
+        tablet.options.push_back(hidden);
         Option light{L"Minecraft light settings", L"When Minecraft starts: render distance 8, simulation 6, no clouds or entity shadows (your own values come back when this is off)", Kind::Toggle};
         light.get = [this] { return mcLight_ ? 1.f : 0.f; };
         light.set = [this, tweaks](float v) {
@@ -3302,13 +3308,26 @@ private:
     }
 
     void publish() {
-        uint32_t index = arcade::writableFrame(shared_);
-        memcpy(shared_->frames[index], screen_.pixels(), arcade::FRAME_BYTES);
-        arcade::publishFrame(shared_, index);
-        if (hqWanted()) {
-            uint32_t hq = arcade::writableHqFrame(shared_);
-            memcpy(shared_->hqFrames[hq], hq_.pixels(), arcade::HQ_FRAME_BYTES);
-            arcade::publishHqFrame(shared_, hq);
+        // Only a changed picture goes out: the game's upload thread copies every published
+        // frame to the GPU, and a tablet showing the same thing 60 times a second (the
+        // launcher, a paused game) would keep it copying for nothing.
+        bool hq = hqWanted();
+        bool same = lastPublished_.size() == arcade::FRAME_BYTES && lastPublishedHq_ == hq &&
+                    memcmp(lastPublished_.data(), screen_.pixels(), arcade::FRAME_BYTES) == 0;
+        if (!same) {
+            lastPublished_.resize(arcade::FRAME_BYTES);
+            memcpy(lastPublished_.data(), screen_.pixels(), arcade::FRAME_BYTES);
+            lastPublishedHq_ = hq;
+            uint32_t index = arcade::writableFrame(shared_);
+            memcpy(shared_->frames[index], screen_.pixels(), arcade::FRAME_BYTES);
+            arcade::publishFrame(shared_, index);
+        }
+        if (hq) {
+            if (!same) {
+                uint32_t hqIndex = arcade::writableHqFrame(shared_);
+                memcpy(shared_->hqFrames[hqIndex], hq_.pixels(), arcade::HQ_FRAME_BYTES);
+                arcade::publishHqFrame(shared_, hqIndex);
+            }
         } else if (shared_->hqLatestFrame != LONG(arcade::NO_FRAME)) {
             InterlockedExchange(&shared_->hqLatestFrame, LONG(arcade::NO_FRAME));
         }
@@ -3323,6 +3342,8 @@ private:
     Canvas screen_;                     // the 1024x574 tablet screen
     Canvas hq_{int(arcade::HQ_WIDTH), int(arcade::HQ_HEIGHT), 2.f};  // the same at 2x (poster quality HIGH, while docked)
     Canvas* target_ = &screen_;
+    std::vector<uint8_t> lastPublished_;  // the picture the game has (publish() skips an unchanged one)
+    bool lastPublishedHq_ = false;
     bool posterHq_ = false;             // SETTINGS > TABLET > Poster quality
     bool mcLight_ = true;               // SETTINGS > TABLET > Minecraft light settings
     bool skipAds_ = true;               // SETTINGS > TABLET > Skip YouTube ads (in the browser, in the background too)

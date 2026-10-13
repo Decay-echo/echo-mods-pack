@@ -57,9 +57,9 @@ public:
     WindowCapture& capture() { return capture_; }
     void quit();                 // polite request, then forced after a grace period
     void kill();
-    // CPU for Echo: a desktop game (Minecraft, Echo in Echo) runs at low priority, at normal
-    // only while it is played (FREEZE); Minecraft's game is suspended outright (no CPU at
-    // all) while the tablet does not show it and nobody plays it.
+    // CPU and GPU for Echo: a desktop game (Minecraft, Echo in Echo) runs at low priority, at
+    // normal only while it is played (FREEZE); hidden Minecraft (the tablet not showing it,
+    // nobody playing it) runs at idle priority with its window minimized, or suspended outright.
     void background(bool shown, bool playing);
     uint64_t age() const { return GetTickCount64() - started_; }
     // How long it has had no window: since launch, or since its window went away (RetroArch
@@ -97,6 +97,8 @@ private:
     int windowScale_ = 1;
     bool gameSuspended_ = false;     // Minecraft's game process is suspended right now
     DWORD suspendedPid_ = 0;
+    uint64_t hiddenSince_ = 0;       // Minecraft: when the tablet stopped showing it (0 = shown or played)
+    bool minimized_ = false;         // Minecraft's window minimized by us while hidden
     int lastPriority_ = -1;          // 1 normal (played), 0 below normal
     void own(DWORD pid);
     bool padState_[PadCount] = {};
