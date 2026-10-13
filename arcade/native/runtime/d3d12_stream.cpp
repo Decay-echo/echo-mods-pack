@@ -118,9 +118,29 @@ void releaseGpu() {
     fence = nullptr; fenceValue = 0; gpuReady = false;
 }
 
+// The uncompressed pictures the game creates (its own art is block-compressed; a picture it
+// downloads, like the lobby's news board, is not): the first 80 of a session go to the log, to
+// find the one behind a board that is not a dynamic poster. Render targets are left out.
+std::atomic<int> surveyed{0};
+void survey(const D3D12_RESOURCE_DESC* d, void** ppv, const char* how) {
+    if (!d || d->Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D || d->Width < 256 || d->Height < 128) return;
+    switch (d->Format) {
+        case DXGI_FORMAT_R8G8B8A8_UNORM: case DXGI_FORMAT_R8G8B8A8_TYPELESS: case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB:
+        case DXGI_FORMAT_B8G8R8A8_UNORM: case DXGI_FORMAT_B8G8R8A8_TYPELESS: case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB:
+        case DXGI_FORMAT_B8G8R8X8_UNORM: case DXGI_FORMAT_R16G16B16A16_FLOAT: case DXGI_FORMAT_R10G10B10A2_UNORM:
+            break;
+        default: return;
+    }
+    if (d->Flags & (D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET | D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL | D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS)) return;
+    if (surveyed.fetch_add(1) >= 80) return;
+    logf("stream: picture texture %llux%u fmt %d mips %u array %u via %s res=%p", static_cast<unsigned long long>(d->Width), unsigned(d->Height),
+         int(d->Format), unsigned(d->MipLevels), unsigned(d->DepthOrArraySize), how, ppv && *ppv ? *ppv : nullptr);
+}
+
 void adopt(ID3D12Device* dev, const D3D12_RESOURCE_DESC* desc, D3D12_RESOURCE_STATES state, void** ppv, const char* how) {
     Target* t = matching(desc);
-    if (!ppv || !*ppv || !t) return;
+    if (!t) { survey(desc, ppv, how); return; }
+    if (!ppv || !*ppv) return;
     ID3D12Resource* resource = nullptr;
     if (FAILED(static_cast<IUnknown*>(*ppv)->QueryInterface(IID_PPV_ARGS(&resource)))) return;
     std::lock_guard<std::mutex> lock(m);

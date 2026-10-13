@@ -115,6 +115,7 @@ public:
             session_.poll();
             if ((mode_ == Mode::Running || mode_ == Mode::Menu) && !session_.alive()) appClosed();
             pollFreeze(now);
+            pollMinecraftFocus(now);
             if (mode_ == Mode::Running && session_.windowless() > 30000) {
                 message_ = L"It did not open a window in 30 s (see host.log).";
                 session_.kill();
@@ -256,18 +257,74 @@ private:
         message_ = L"Pick a profile and PLAY (tap the tablet), then FREEZE: your controllers play Minecraft.";
     }
     // A tap on the picture clicks there in the launcher or the game's menus (posted: no focus).
+    // Minecraft's picture: a tap is a real click there and a slide scrolls (the world and server
+    // lists), as real mouse input. Its menus take no posted clicks, so the window gets the focus
+    // for the click and Echo gets it back a moment later (not while FREEZE holds it on Minecraft).
     void minecraftTouch(const Touch& t) {
         if (BALATRO_HOME.contains(t.x, t.y)) { if (!t.down) openMenu(); return; }
-        if (t.down || !session_.hasWindow()) { if (!t.down) pressed_ = -1; return; }
+        if (!session_.hasWindow()) { if (!t.down) pressed_ = -1; return; }
         float u, v;
-        if (!toApp(t.x, t.y, u, v)) return;
+        if (!toApp(t.x, t.y, u, v)) { if (!t.down) mcFinger_ = false; return; }
         HWND window = session_.window();
         RECT client{};
         GetClientRect(window, &client);
         POINT at{LONG(u * client.right), LONG(v * client.bottom)};
         ClientToScreen(window, &at);
-        pageHover(window, at);
-        pageTap(window, at);
+        if (t.down) {
+            if (!mcFinger_) {
+                mcFinger_ = true;
+                mcScrolled_ = false;
+                mcX0_ = mcX_ = t.x;
+                mcY0_ = mcY_ = t.y;
+                mcAt_ = at;
+                return;
+            }
+            int dy = t.y - mcY_;
+            mcX_ = t.x;
+            mcY_ = t.y;
+            if (!mcScrolled_ && std::abs(t.x - mcX0_) + std::abs(t.y - mcY0_) < TAP_SLOP) return;
+            mcScrolled_ = true;
+            if (dy) mcMouse(window, at, dy * 120 / 80);  // the list follows the finger: 80 tablet px a notch
+            return;
+        }
+        for (auto& [cell, h] : held_)
+            if (fit_.contains(h.x, h.y)) return;  // another cell of the same finger is still down
+        if (!mcFinger_) return;
+        mcFinger_ = false;
+        if (!mcScrolled_) mcMouse(window, mcAt_, 0);
+    }
+    // Real mouse input into Minecraft's window at a screen point: a click (wheel 0) or a wheel
+    // turn. The focus goes to Minecraft for it when it isn't there, and back to Echo soon after.
+    void mcMouse(HWND window, POINT at, int wheel) {
+        bool hadFocus = GetForegroundWindow() == window;
+        if (!hadFocus) {
+            if (!freeze_ && !echoWindow_) echoWindow_ = GetForegroundWindow();
+            if (!minecraft::focus(window)) { message_ = L"Minecraft's window would not come to the front."; return; }
+            Sleep(60);
+        }
+        SetCursorPos(at.x, at.y);
+        Sleep(20);
+        INPUT in{};
+        in.type = INPUT_MOUSE;
+        if (wheel) {
+            in.mi.dwFlags = MOUSEEVENTF_WHEEL;
+            in.mi.mouseData = DWORD(wheel);
+            SendInput(1, &in, sizeof in);
+        } else {
+            in.mi.dwFlags = MOUSEEVENTF_LEFTDOWN;
+            SendInput(1, &in, sizeof in);
+            Sleep(40);
+            in.mi.dwFlags = MOUSEEVENTF_LEFTUP;
+            SendInput(1, &in, sizeof in);
+        }
+        if (!freeze_) mcFocusBackAt_ = GetTickCount64() + 300;  // after the last tap or slide
+    }
+    void pollMinecraftFocus(uint64_t now) {
+        if (!mcFocusBackAt_ || now < mcFocusBackAt_) return;
+        mcFocusBackAt_ = 0;
+        if (freeze_) return;  // FREEZE keeps the focus on Minecraft
+        HWND echo = echoWindow();
+        if (echo && GetForegroundWindow() != echo && !minecraft::focus(echo)) hostLog("minecraft: could not give Echo VR the focus back after a tap");
     }
     HWND echoWindow() { return echoWindow_ && IsWindow(echoWindow_) ? echoWindow_ : minecraft::mainWindowOf(DWORD(shared_->gamePid)); }
 
@@ -1928,6 +1985,10 @@ private:
     bool padHidden_ = false;            // RetroArch: FULL SCREEN, the on-screen pad away
     minecraft::Input mcInput_;          // FREEZE in Minecraft: the controllers as keyboard and mouse
     HWND echoWindow_ = nullptr;         // Echo VR's window, to give the focus back to
+    bool mcFinger_ = false, mcScrolled_ = false;  // a finger on Minecraft's picture, and whether it slid
+    int mcX0_ = 0, mcY0_ = 0, mcX_ = 0, mcY_ = 0;
+    POINT mcAt_{};
+    uint64_t mcFocusBackAt_ = 0;        // when Echo gets the focus back after a tap on Minecraft
     uint64_t lastRefocus_ = 0;
     std::string linkPin_;
     uint64_t linkStarted_ = 0, lastLinkPoll_ = 0, controlsUntil_ = 0, lastTimeline_ = 0;
