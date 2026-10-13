@@ -499,6 +499,16 @@ def check(args):
             say(f'  {label}: {path}')
             for l in lines:
                 say('    ' + l.strip()[:160])
+    # YouTube and videos on the tablet, from the host's log of its last run: the window it showed,
+    # every tap on the page and where it landed, why the screen went away, captures, launches.
+    host = tail(local / 'EchoArcade' / 'host.log', 3000) or []
+    starts = [i for i, l in enumerate(host) if 'ArcadeHost started' in l]
+    last = host[starts[-1]:] if starts else host[-300:]
+    keep = [l for l in last if any(k in l for k in ('youtube:', 'capture:', 'launched pid', 'app exited', 'mpv:', 'first captured', 'window ', 'audio:'))]
+    if keep:
+        say('  YouTube / video, last tablet run (%d lines):' % len(keep))
+        for l in keep[-40:]:
+            say('    ' + l.strip()[:220])
     # The dock, from the arcade plugin's log of the last Echo start: the posters it recognised
     # in each lobby, where it docked, and whether a turned picture (the central display) was fed.
     runtime = tail(local / 'EchoArcade' / 'runtime.log', 3000) or []

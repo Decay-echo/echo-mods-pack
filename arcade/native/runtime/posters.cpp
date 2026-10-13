@@ -215,10 +215,11 @@ int posterOf(void* gs, U handle) {
 
 bool hasFace(unsigned mesh) { return mesh != POSTER_NO_MESH; }
 
-// Models AUTO DOCK leaves alone: the six banners hanging around the social lobby's middle column
-// (POSTER_MODELS is the generated table's model per mesh). They are the first posters near a
-// player who has just spawned, and nobody plays on a banner 4 m up.
-constexpr uint64_t BANNER_MODELS[] = {0x1a45a951ebda2ea9};
+// Models AUTO DOCK leaves alone (POSTER_MODELS is the generated table's model per mesh): the four
+// tall boards along the social lobby's entrance (two-sided, 1.5 x 2.8 m, their art stored turned).
+// They are the first posters a player meets coming out of the staging area, and the user wants
+// them left as they are.
+constexpr uint64_t BANNER_MODELS[] = {0xea17a1c953a43e21};
 bool banner(unsigned mesh) {
     if (mesh == POSTER_NO_MESH) return false;
     for (uint64_t m : BANNER_MODELS)
