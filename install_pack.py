@@ -340,6 +340,17 @@ def check(args):
             say(f'  {label}: {path}')
             for l in lines:
                 say('    ' + l.strip()[:160])
+    # The dock, from the arcade plugin's log of the last Echo start: the posters it recognised
+    # in each lobby, where it docked, and whether a turned picture (the central display) was fed.
+    runtime = tail(local / 'EchoArcade' / 'runtime.log', 3000) or []
+    starts = [i for i, l in enumerate(runtime) if 'started ArcadeHost' in l or 'arcade runtime' in l.lower()]
+    session = runtime[starts[-1]:] if starts else runtime[-400:]
+    keep = [l for l in session if ('posters:' in l and not any(k in l for k in ('No lobby poster here', 'Docked on ', 'Undocked', 'near the poster', 'touched the poster', 'fingertips from', 'hands from')))
+            or (('stream: turned' in l or 'stream: poster' in l) and 'frames uploaded' not in l)]
+    if keep:
+        say('  dock, last Echo start (%d lines):' % len(keep))
+        for l in keep[-40:]:
+            say('    ' + l.strip()[:200])
     say('')
     say('[tablet data]')
     try:
