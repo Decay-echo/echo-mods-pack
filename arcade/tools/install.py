@@ -48,7 +48,7 @@ MID = '48037dc70b0ecab2'
 STOCK_NPKG = 3
 STOCK_SHA256 = 'e2ae781d32a7fdea89b67a638f33dbab997117c157544b76efa20368eb498fd9'
 EXE_TIMESTAMP, EXE_SIZE = 1683152886, 35852288
-TAB_SCHEMA = 3  # bump when build_arcade_tab.py output changes (2: DOCK poster screen; 3: the turned poster screen)
+TAB_SCHEMA = 4  # bump when build_arcade_tab.py output changes (2: DOCK poster screen; 3: the turned poster screen; 4: the news board as a poster)
 RETROARCH = ROOT / 'apps/retroarch/retroarch.exe'
 
 

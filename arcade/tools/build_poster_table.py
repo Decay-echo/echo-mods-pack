@@ -29,6 +29,10 @@ FACE_V = (0.0, 0.5)                    # (the central display's face reaches 0.0
 FACE_MIN_AREA = 0.002                  # a face triangle's UV area as |det|: edge strips are ~0.0014, a curved poster's strips ~0.025
 TRANSFORM_STRIDE = 0xb0
 NO_MESH = 0xffffffff                   # PosterInfo.mesh of a poster without a face map
+# The social lobby's big news board: not a dynamic poster in the stock data; the installer's
+# manifest patch adds it (build_arcade_tab.news_board_posters), and the table lists it whether
+# the data read here is stock or patched.
+EXTRA_POSTERS = {0xd09afd15b1c75c04: [0xe785e3f6ff56eda5], 0x3c8d74713ced8c3f: [0xe785e3f6ff56eda5]}
 
 
 def records(blob, stride=None):
@@ -132,8 +136,9 @@ def build():
         rows = records(manifest.get(poster_type, level))
         transforms = records(manifest.get(P.typesym('CTransformCR'), level), TRANSFORM_STRIDE)
         instances = manifest.get(P.typesym('CInstanceModelCR'), level)
-        for row in rows:
-            actor = struct.unpack_from('<Q', row, 8)[0]
+        actors = [struct.unpack_from('<Q', row, 8)[0] for row in rows] + [a for a in EXTRA_POSTERS.get(level, []) if a not in
+                                                                             {struct.unpack_from('<Q', r, 8)[0] for r in rows}]
+        for actor in actors:
             if actor in posters:
                 continue
             resource = mesh_of(manifest, instances, actor)

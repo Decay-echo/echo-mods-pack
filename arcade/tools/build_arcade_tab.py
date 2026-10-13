@@ -106,6 +106,51 @@ def poster_bgra(width=POSTER_TEX_W, height=POSTER_TEX_H, splash=True):
     return bytes(px)
 
 
+# The social lobby's big news board: actor NEWS_BOARD, an instance of the big poster model
+# (0c502eb30f10bc63) standing between the four small posters of the far wall, but not one of the
+# level's dynamic posters, so the game's poster system (and the dock) never touch it. Each
+# lobby level that has it gets a dynamic-poster row for it, cloned from the level's own rows
+# with the big poster model's texture, so it is a poster like the others (it then shows the
+# poster system's art instead of its own picture while undocked).
+NEWS_BOARD = 0xe785e3f6ff56eda5
+NEWS_BOARD_LEVELS = (0xd09afd15b1c75c04, 0x3c8d74713ced8c3f)
+BIG_POSTER_TEXTURE = 0xa240a2bc051b2f23   # the big poster model's own texture (what the row says it replaces)
+NEWS_BOARD_SLICE = 2                      # its art while undocked: a slice of that texture
+POSTER_COMPONENT = 0x80011e8d2e3d410e     # the instance-model component the poster system looks for
+
+
+def news_board_posters(stock):
+    """[(level, CR15NetDynamicPosterCR blob with the board's row added)] for the lobby levels that
+    carry the board and lack the row."""
+    pt = P.typesym('CR15NetDynamicPosterCR')
+    out = []
+    for level in NEWS_BOARD_LEVELS:
+        blob = stock.get(pt, level)
+        if blob is None:
+            continue
+        n = struct.unpack_from('<Q', blob, 0x28)[0]
+        stride = (len(blob) - 0x38) // n
+        rows = [blob[0x38 + i * stride:0x38 + (i + 1) * stride] for i in range(n)]
+        if any(struct.unpack_from('<Q', r, 8)[0] == NEWS_BOARD for r in rows):
+            continue  # already there (a patched manifest)
+        instances = stock.get(P.typesym('CInstanceModelCR'), level) or b''
+        if instances.find(struct.pack('<QQ', POSTER_COMPONENT, NEWS_BOARD)) < 0:
+            print(f'news board: level {level:016x} has no instance model for it; left out')
+            continue
+        row = bytearray(rows[0])
+        struct.pack_into('<Q', row, 8, NEWS_BOARD)
+        struct.pack_into('<Q', row, 0x28, BIG_POSTER_TEXTURE)
+        struct.pack_into('<Q', row, 0x30, NEWS_BOARD_SLICE)
+        struct.pack_into('<Q', row, 0x38, 0xffffffffffffffff)
+        hdr = bytearray(blob[:0x38])
+        struct.pack_into('<I', hdr, 8, (n + 1) * stride)
+        struct.pack_into('<Q', hdr, 0x28, n + 1)
+        struct.pack_into('<Q', hdr, 0x30, n + 1)
+        out.append((level, bytes(hdr) + b''.join(rows) + bytes(row)))
+        print(f'news board: level {level:016x} gets a dynamic-poster row for {NEWS_BOARD:016x} ({n + 1} posters)')
+    return out
+
+
 def rect_of(row):
     return list(struct.unpack_from('<4f', row, 0x34))
 
@@ -277,6 +322,8 @@ def build():
     icon_cpu, icon_gpu = texture_pair(stock, icon_w, icon_h, icon_pixels)
     poster_cpu, poster_gpu = texture_pair(stock, POSTER_TEX_W, POSTER_TEX_H, poster_bgra())
     turned_cpu, turned_gpu = texture_pair(stock, POSTER_TURNED_W, POSTER_TURNED_H, poster_bgra(POSTER_TURNED_W, POSTER_TURNED_H, splash=False))
+    for level, blob in news_board_posters(stock):
+        patcher.add_item('CR15NetDynamicPosterCR', False, f'0x{level:016x}', blob)
     patcher.add_item('CUICanvasResource', False, f'0x{ROOT_CANVAS:016x}', root.serialize())
     patcher.add_item('CUICanvasResource', False, f'0x{NAV_CANVAS:016x}', nav.serialize())
     patcher.add_item('CUICanvasResource', False, f'0x{PAGE:016x}', page.serialize())
