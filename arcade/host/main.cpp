@@ -45,6 +45,8 @@ const Rect FREEZE_BUTTON{470, 12, 734, 64};                 // launcher header
 const Rect MENU_DOCK_BUTTON{312, 334, 712, 396};            // in-app menu
 const Rect MENU_FREEZE_BUTTON{312, 408, 712, 470};          // in-app menu
 const Rect MENU_HOME_BUTTON{312, 482, 712, 544};            // in-app menu: the launcher, the app kept running
+const Rect SIDE_BIG_BUTTON{640, 500, 1004, 560};            // the cross-play side poster: bring it to the big screen
+constexpr int SIDE_LISTEN = 0, SIDE_CROSS = 1, SIDE_DISCORD = 2, SIDE_FRIENDS = 3;  // top-left, top-right, bottom-left, bottom-right
 constexpr uint64_t SHOT_PRESS_MS = 90;                      // a shot holds its tap this long
 const Rect PAGE_UP{916, 84, 1012, 298}, PAGE_DOWN{916, 306, 1012, 520};
 constexpr int ROWS_PER_PAGE = 6, ROW_Y = 84, ROW_H = 72;
@@ -170,6 +172,7 @@ public:
                 composeSplit();
                 share_.offer(share_.split() ? split_.pixels() : screen_.pixels(), SCREEN_W, SCREEN_H);
                 offerMyTablet();
+                renderSides(now);
                 lastPublish = now;
             }
             Sleep(4);
@@ -1019,7 +1022,7 @@ private:
             } else {
                 int x = std::clamp(int(e.xy & 0xffff), 0, SCREEN_W - 1), y = std::clamp(int(e.xy >> 16), 0, SCREEN_H - 1);
                 if (e.kind == arcade::Shot) onShot(x, y);
-                else if (e.cell < 2) onTouch({POSTER_TOUCH + int(e.cell), e.kind != arcade::PointUp, x, y, e.kind == arcade::PointMove});
+                else if ((e.cell & 0xff) < 2) onTouch({POSTER_TOUCH + int(e.cell & 0xff), e.kind != arcade::PointUp, x, y, e.kind == arcade::PointMove, int(e.cell >> 8) - 1});
             }
             readPos_++;
         }
@@ -1341,6 +1344,7 @@ private:
         shared_->tabletScale = LONG(std::clamp(iniFloat(t, L"tablet", L"scale", 1.f), .5f, 4.f) * 1000);
         autoDock_ = GetPrivateProfileIntW(L"dock", L"auto", 1, t.c_str()) != 0;  // on unless turned off
         posterHq_ = _wcsicmp(iniText(t, L"poster", L"quality", L"normal").c_str(), L"high") == 0;
+        sidesOn_ = GetPrivateProfileIntW(L"sides", L"enabled", 1, t.c_str()) != 0;
         skipAds_ = GetPrivateProfileIntW(L"youtube", L"skip_ads", 1, t.c_str()) != 0;
         session_.setWindowScale(posterHq_ ? 2 : 1);
         mcLight_ = GetPrivateProfileIntW(L"minecraft", L"light", 1, t.c_str()) != 0;
@@ -1395,6 +1399,10 @@ private:
                                  : L"Poster quality NORMAL: from the next dock.";
         };
         tablet.options.push_back(quality);
+        Option sides{L"Side posters", L"Docked on the lobby's news board: the four posters beside it show listening mode, cross play, Discord and friends", Kind::Toggle};
+        sides.get = [this] { return sidesOn_ ? 1.f : 0.f; };
+        sides.set = [this, tweaks](float v) { sidesOn_ = v != 0; iniWrite(tweaks, L"sides", L"enabled", sidesOn_ ? L"1" : L"0"); };
+        tablet.options.push_back(sides);
         Option light{L"Minecraft light settings", L"When Minecraft starts: render distance 8, simulation 6, no clouds or entity shadows (only ever lowered), so Echo keeps its frames", Kind::Toggle};
         light.get = [this] { return mcLight_ ? 1.f : 0.f; };
         light.set = [this, tweaks](float v) {
@@ -1843,6 +1851,7 @@ private:
             lastTouchAt_ = touchNow;
         }
         if (!loading_.empty() && !settingsMode()) return;
+        if (t.side >= 0) { sideTouch(t); return; }  // a side poster: only the cross-play one has a button
         if (dstate_.call.at && callTouch(t)) return;
         if (discordMode()) { discordTouch(t); return; }
         if (settingsMode()) { settingsTouch(t); return; }
@@ -2333,7 +2342,7 @@ private:
         }
     }
     void pollMedia(uint64_t now) {
-        if (mode_ != Mode::Media || mediaPageBusy_ || now - lastMediaPage_ < 1000) return;
+        if ((mode_ != Mode::Media && !sidesLive_) || mediaPageBusy_ || now - lastMediaPage_ < 1000) return;
         lastMediaPage_ = now;
         mediaPageBusy_ = true;
         std::wstring artKey = mediaArtKey_;
@@ -2391,16 +2400,150 @@ private:
             pending_.push_back([this, ok] { if (!ok) message_ = L"Nothing is playing that Windows can control."; lastMediaPage_ = 0; });
         });
     }
-    void drawMedia() {
-        if (mediaListen_) {  // listening mode: the cover front and centre, a soft wash of its colours around it, the track scrolling by
-            if (mediaBack_) canvas_.blit(mediaBack_->bgra.data(), mediaBack_->w, mediaBack_->h, mediaBack_->w * 4, {0, 0, SCREEN_W, SCREEN_H});
-            else canvas_.clear(rgb(6, 6, 10));
-            if (mediaArt_) canvas_.blit(mediaArt_->bgra.data(), mediaArt_->w, mediaArt_->h, mediaArt_->w * 4, {0, 0, SCREEN_W, SCREEN_H});
-            else canvas_.text({0, 150, SCREEN_W, 330}, L"\x266B", 150, rgb(60, 70, 100));
-            if (!mediaNow_.valid) canvas_.text({0, SCREEN_H - 70, SCREEN_W, SCREEN_H - 30}, L"Nothing is playing", 24, rgb(200, 205, 220), false);
-            else blendMarquee(SCREEN_H - 84, int((GetTickCount64() / 12) % 100000), mediaNow_.playing ? 0.55f : 0.3f);
+    // Listening mode: the cover front and centre, a soft wash of its colours around it, the
+    // track scrolling by (the MEDIA page's, and the first side poster's).
+    void drawListening() {
+        if (mediaBack_) canvas_.blit(mediaBack_->bgra.data(), mediaBack_->w, mediaBack_->h, mediaBack_->w * 4, {0, 0, SCREEN_W, SCREEN_H});
+        else canvas_.clear(rgb(6, 6, 10));
+        if (mediaArt_) canvas_.blit(mediaArt_->bgra.data(), mediaArt_->w, mediaArt_->h, mediaArt_->w * 4, {0, 0, SCREEN_W, SCREEN_H});
+        else canvas_.text({0, 150, SCREEN_W, 330}, L"\x266B", 150, rgb(60, 70, 100));
+        if (!mediaNow_.valid) canvas_.text({0, SCREEN_H - 70, SCREEN_W, SCREEN_H - 30}, L"Nothing is playing", 24, rgb(200, 205, 220), false);
+        else blendMarquee(SCREEN_H - 84, int((GetTickCount64() / 12) % 100000), mediaNow_.playing ? 0.55f : 0.3f);
+    }
+    // ---- the side posters: four pictures of their own while the arcade is docked on the
+    // lobby's news board (its four small neighbours each sample a slice of one texture).
+    void renderSides(uint64_t now) {
+        bool live = sidesOn_ && docked();
+        if (live != sidesLive_) {
+            sidesLive_ = live;
+            shared_->sideWanted = live ? (1 << arcade::SIDES) - 1 : 0;
+            if (live) { for (auto& h : sideHash_) h = 0; lastMediaPage_ = 0; }
+            hostLog("sides: %s", live ? "on (the four posters beside the board get their own pictures)" : "off");
+        }
+        if (!live || now - lastSides_ < 66) return;
+        lastSides_ = now;
+        for (int i = 0; i < arcade::SIDES; i++) {
+            target_ = &side_[i];
+            switch (i) {
+                case SIDE_LISTEN: drawListening(); break;
+                case SIDE_CROSS: drawCrossPlay(); break;
+                case SIDE_DISCORD: drawDiscordPoster(); break;
+                default: drawFriendsPoster(); break;
+            }
+            canvas_.opaque();
+            target_ = &screen_;
+            publishSide(i);
+        }
+    }
+    void publishSide(int i) {  // only when the picture changed (a sample of its pixels)
+        const uint32_t* px = side_[i].pixels();
+        uint64_t hash = 1469598103934665603ull;
+        for (size_t k = 0; k < size_t(SCREEN_W) * SCREEN_H; k += 61) { hash ^= px[k]; hash *= 1099511628211ull; }
+        if (hash == sideHash_[i]) return;
+        sideHash_[i] = hash;
+        InterlockedIncrement(&shared_->sideSerial[i]);  // odd: being written
+        MemoryBarrier();
+        memcpy(shared_->sideFrames[i], px, arcade::FRAME_BYTES);
+        MemoryBarrier();
+        InterlockedIncrement(&shared_->sideSerial[i]);  // even: whole
+    }
+    void drawCrossPlay() {
+        canvas_.clear(rgb(8, 8, 12));
+        if (share_.running() && share_.split()) {
+            canvas_.blit(reinterpret_cast<const uint8_t*>(split_.pixels()), SCREEN_W, SCREEN_H, SCREEN_W * 4, {0, 0, SCREEN_W, SCREEN_H});
+        } else if (watch_.active()) {
+            auto pic = watch_.latest();
+            if (pic && pic->w) canvas_.blit(pic->bgra.data(), pic->w, pic->h, pic->w * 4, {0, 0, SCREEN_W, SCREEN_H});
+            else canvas_.text({0, 240, SCREEN_W, 290}, watch_.status(), 28, rgb(200, 205, 220));
+        } else {
+            canvas_.text({0, 150, SCREEN_W, 210}, L"CROSS PLAY", 44, rgb(230, 120, 220));
+            canvas_.text({0, 222, SCREEN_W, 262}, L"Your friends' tablets appear here", 24, rgb(200, 205, 220), false);
+            canvas_.text({0, 268, SCREEN_W, 306}, L"Tablet: SPLIT SCREEN, then they join with your code in WATCH A FRIEND", 20, rgb(150, 160, 180), false);
+            if (share_.running() && !share_.code().empty()) canvas_.text({0, 330, SCREEN_W, 400}, share_.code(), 56, rgb(90, 200, 255));
+        }
+        button(SIDE_BIG_BUTTON, L"\x25B2  TO THE BIG SCREEN", pressed_ == 840, rgb(50, 58, 84), 22);
+    }
+    void drawDiscordPoster() {
+        canvas_.clear(rgb(18, 19, 26));
+        canvas_.fill({0, 0, SCREEN_W, 70}, rgb(88, 101, 242));
+        canvas_.text({24, 0, 600, 70}, L"DISCORD", 40, rgb(255, 255, 255), true, 0);
+        const DiscordState& s = dstate_;
+        if (!discord_.configured() || !s.authed) {
+            canvas_.text({0, 240, SCREEN_W, 290}, discord_.configured() ? (s.status.empty() ? L"Connecting..." : s.status) : L"Not set up (DISCORD tab on the tablet)", 26, rgb(200, 205, 220), false);
             return;
         }
+        canvas_.text({SCREEN_W - 420, 0, SCREEN_W - 24, 70}, s.me.name, 24, rgb(230, 235, 255), false, 2);
+        if (s.channelId.empty()) {
+            canvas_.text({0, 150, SCREEN_W, 200}, L"Not in a voice call", 32, rgb(200, 205, 220));
+        } else {
+            canvas_.text({24, 80, SCREEN_W - 24, 112}, L"In  " + s.channelName + L"   -   " + std::to_wstring(s.members.size()) + (s.members.size() == 1 ? L" person" : L" people"), 22, rgb(200, 210, 230), false, 0);
+            int n = std::min<int>(8, int(s.members.size()));
+            int cols = n <= 4 ? n : 4, rows = n <= 4 ? 1 : 2;
+            int cell = cols <= 2 ? 300 : 244, avatar = rows == 1 ? 150 : 110;
+            int x0 = (SCREEN_W - cols * cell) / 2, y0 = rows == 1 ? 150 : 118;
+            for (int i = 0; i < n; i++) {
+                const DiscordMember& m = s.members[size_t(i)];
+                int x = x0 + (i % cols) * cell, y = y0 + (i / cols) * (avatar + 70);
+                Rect box{x + (cell - avatar) / 2, y, x + (cell - avatar) / 2 + avatar, y + avatar};
+                drawAvatar(m.user, box, m.speaking ? rgb(60, 220, 110) : rgb(50, 54, 72), m.speaking ? 8 : 3);
+                canvas_.text({x, y + avatar + 4, x + cell, y + avatar + 34}, m.user.name, 22, m.self ? rgb(90, 200, 255) : rgb(240, 240, 245), true);
+                std::wstring tag = m.deaf ? L"deafened" : m.mute ? L"muted" : m.speaking ? L"talking" : L"";
+                if (!tag.empty()) canvas_.text({x, y + avatar + 34, x + cell, y + avatar + 58}, tag, 17, m.speaking ? rgb(60, 220, 110) : rgb(255, 120, 120), false);
+            }
+        }
+        // the newest messages along the bottom
+        int y = SCREEN_H - 30;
+        int shown = 0;
+        for (auto& note : s.notes) {
+            if (shown++ >= 3) break;
+            canvas_.fill({0, y - 36, SCREEN_W, y}, rgb(24, 26, 36));
+            drawAvatar(note.from, {12, y - 33, 42, y - 3}, rgb(50, 54, 72), 1);
+            canvas_.text({52, y - 36, SCREEN_W - 12, y}, note.from.name + L":  " + note.text, 18, rgb(220, 225, 235), false, 0);
+            y -= 38;
+        }
+    }
+    void drawFriendsPoster() {
+        canvas_.clear(rgb(12, 14, 22));
+        canvas_.text({24, 10, 600, 70}, L"FRIENDS", 40, rgb(90, 200, 255), true, 0);
+        int y = 90;
+        if (share_.running()) {
+            std::wstring c = share_.code();
+            canvas_.text({24, y, SCREEN_W - 24, y + 34}, share_.split() ? L"Split screen is on. Friends join with:" : L"Your tablet is shared. Friends watch with:", 24, rgb(200, 210, 230), false, 0);
+            canvas_.text({24, y + 40, SCREEN_W - 24, y + 110}, c.empty() ? share_.lanCode() : c, 56, rgb(255, 255, 255), true, 0);
+            if (!c.empty() && !share_.lanCode().empty()) canvas_.text({24, y + 112, SCREEN_W - 24, y + 142}, L"LAN code " + share_.lanCode(), 20, rgb(150, 160, 180), false, 0);
+            int n = share_.viewers();
+            canvas_.text({24, y + 150, SCREEN_W - 24, y + 184}, std::to_wstring(n) + (n == 1 ? L" friend connected" : L" friends connected"), 24, rgb(200, 210, 230), false, 0);
+            y += 200;
+        } else {
+            canvas_.text({24, y, SCREEN_W - 24, y + 34}, L"Not sharing. Tablet: SHARE MY TABLET or SPLIT SCREEN gives friends a code.", 22, rgb(200, 210, 230), false, 0);
+            y += 50;
+        }
+        auto list = friends();
+        if (!list.empty()) {
+            canvas_.text({24, y, SCREEN_W - 24, y + 30}, L"Friends you have watched:", 20, rgb(150, 160, 180), false, 0);
+            y += 36;
+            for (auto& f : list) {
+                if (y > SCREEN_H - 40) break;
+                canvas_.text({40, y, SCREEN_W - 24, y + 30}, f.first + L"    " + f.second, 22, rgb(220, 225, 235), false, 0);
+                y += 34;
+            }
+        }
+        if (watch_.active()) canvas_.text({24, SCREEN_H - 40, SCREEN_W - 24, SCREEN_H - 8}, L"Watching " + watch_.friendName(), 20, rgb(90, 200, 255), false, 0);
+    }
+    void sideTouch(const Touch& t) {
+        if (t.side != SIDE_CROSS) { if (!t.down) pressed_ = -1; return; }
+        if (tapped(t, 840, SIDE_BIG_BUTTON)) {
+            if (share_.running() && share_.split()) { mode_ = Mode::Split; splitBarUntil_ = GetTickCount64() + 6000; }
+            else if (watch_.active()) { mode_ = Mode::Watch; watchBarUntil_ = GetTickCount64() + 6000; }
+            else splitTapped();
+            resetInput();
+            return;
+        }
+        if (!t.down) pressed_ = -1;
+    }
+
+    void drawMedia() {
+        if (mediaListen_) { drawListening(); return; }
         canvas_.clear(rgb(14, 16, 24));
         header(L"MEDIA", true);
         if (mediaNow_.valid) {
@@ -3160,6 +3303,10 @@ private:
     ShareServer share_;                 // SHARE MY TABLET / SPLIT SCREEN
     ShareClient watch_;                 // WATCH A FRIEND
     Canvas split_;                      // the split screen's picture (composeSplit)
+    Canvas side_[arcade::SIDES];        // the side posters' pictures
+    uint64_t sideHash_[arcade::SIDES] = {};
+    uint64_t lastSides_ = 0;
+    bool sidesOn_ = true, sidesLive_ = false;  // SETTINGS > TABLET > Side posters; on right now (docked)
     uint64_t splitBarUntil_ = 0;
     bool landing_ = false;              // tapped(): this touch is a new poke (see onTouch)
     bool background_ = false;           // HOME: the app runs on behind the launcher

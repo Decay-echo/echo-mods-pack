@@ -47,11 +47,13 @@ std::atomic<bool> running{false}, broken{false};
 std::thread worker;
 
 // A texture we copy each new host frame into, at (x, y).
-enum Image { FRAME = 0, TURNED = 1, HQ = 2 };  // which image of a slot feeds it
+enum Image { FRAME = 0, TURNED = 1, HQ = 2, SIDE = 3 };  // which image of a slot feeds it
 struct Target {
     const char* name;
     UINT width, height, x, y;
-    int image;  // FRAME: the host frame; TURNED: the frame turned (poster_turn.h); HQ: the host's 2x frame
+    int image;  // FRAME: the host frame; TURNED: the frame turned (poster_turn.h); HQ: the host's 2x frame; SIDE: the side frames, a slice each
+    UINT arraySize = 1;
+    LONG sideUploaded[arcade::SIDES] = {-1, -1, -1, -1};  // SIDE: the side serial each slice holds
     std::atomic<bool> active{false};
     std::atomic<ID3D12Resource*> fast{nullptr};
     ID3D12Resource* resource = nullptr;  // AddRef'd while we hold it (guarded by m)
@@ -59,20 +61,22 @@ struct Target {
     D3D12_RESOURCE_STATES state = D3D12_RESOURCE_STATE_COMMON;
     UINT64 uploads = 0;
 };
-enum { TABLET, POSTER, POSTER_TURNED, POSTER_HQ, TARGETS };
+enum { TABLET, POSTER, POSTER_TURNED, POSTER_HQ, SIDES_T, TARGETS };
 Target targets[TARGETS] = {
     {"tablet", ARCADE_TEX_W, ARCADE_TEX_H, 0, 0, FRAME},
     {"poster", POSTER_TEX_W, POSTER_TEX_H, POSTER_X0, POSTER_Y0, FRAME},
     {"poster (turned)", POSTER_TURNED_W, POSTER_TURNED_H, POSTER_X0, POSTER_Y0, TURNED},
     {"poster (HQ)", POSTER_HQ_W, POSTER_HQ_H, POSTER_HQ_X0, POSTER_HQ_Y0, HQ},
+    {"sides", POSTER_TEX_W, POSTER_TEX_H, POSTER_X0, POSTER_Y0, SIDE, ARCADE_SIDES},
 };
+static_assert(ARCADE_SIDES == arcade::SIDES, "the side posters' slice count is the shared frame count");
 std::atomic<uint32_t> turnPacked{0x01000001u};  // ur, ud, vr, vd as bytes (signed), upright by default
 PosterTurn currentTurn() {
     uint32_t p = turnPacked.load();
     return {int(int8_t(p >> 24)), int(int8_t(p >> 16)), int(int8_t(p >> 8)), int(int8_t(p))};
 }
 constexpr UINT IMAGE_BYTES = arcade::PITCH * arcade::HEIGHT;  // one frame in a slot; the turned one follows it, then the 2x one
-constexpr UINT HQ_OFFSET = IMAGE_BYTES * 2, SLOT_BYTES = HQ_OFFSET + arcade::HQ_FRAME_BYTES;
+constexpr UINT HQ_OFFSET = IMAGE_BYTES * 2, SIDES_OFFSET = HQ_OFFSET + arcade::HQ_FRAME_BYTES, SLOT_BYTES = SIDES_OFFSET + arcade::SIDES * IMAGE_BYTES;
 static_assert(ARCADE_TEX_W == arcade::WIDTH && ARCADE_TEX_H == arcade::HEIGHT, "tablet texture is the host frame size");
 static_assert(POSTER_FRAME_W == arcade::WIDTH && POSTER_FRAME_H == arcade::HEIGHT, "poster frame is the host frame size");
 static_assert(POSTER_HQ_FRAME_W == arcade::HQ_WIDTH && POSTER_HQ_FRAME_H == arcade::HQ_HEIGHT, "the HQ poster frame is the host's 2x frame");
@@ -93,6 +97,8 @@ struct Slot {
     UINT64 fenceValue = 0;
     LONG serial = 0;
     bool hqValid = false;  // the 2x image of this slot holds a frame
+    LONG sideSerial[arcade::SIDES] = {};  // the side frame each side image of this slot holds (sideValid says it is whole)
+    bool sideValid[arcade::SIDES] = {};
     SlotState state = SlotState::Free;
 };
 Slot slots[2];
@@ -105,10 +111,10 @@ bool anyActive() {
 }
 
 Target* matching(const D3D12_RESOURCE_DESC* d) {
-    if (!d || d->Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D || d->DepthOrArraySize != 1 || d->MipLevels > 1) return nullptr;
+    if (!d || d->Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D || d->MipLevels > 1) return nullptr;
     if (d->Format != DXGI_FORMAT_B8G8R8A8_UNORM && d->Format != DXGI_FORMAT_B8G8R8A8_TYPELESS && d->Format != DXGI_FORMAT_B8G8R8A8_UNORM_SRGB) return nullptr;
     for (auto& t : targets)
-        if (d->Width == t.width && d->Height == t.height) return &t;
+        if (d->Width == t.width && d->Height == t.height && d->DepthOrArraySize == t.arraySize) return &t;
     return nullptr;
 }
 
@@ -155,6 +161,7 @@ void adopt(ID3D12Device* dev, const D3D12_RESOURCE_DESC* desc, D3D12_RESOURCE_ST
     t->fast = resource;
     t->desc = *desc;
     t->state = state;
+    for (auto& u : t->sideUploaded) u = -1;  // a new texture holds nothing yet
     device = dev;
     logf("stream: %s texture created via %s res=%p fmt=%d state=0x%x", t->name, how, resource, int(desc->Format), unsigned(state));
 }
@@ -272,6 +279,17 @@ void workerLoop() {
                 InterlockedExchange(&shared->hqReadingFrame, LONG(arcade::NO_FRAME));
             }
         }
+        if (ok && targets[SIDES_T].active) {  // the side images: whichever side frames changed since this slot last held them
+            for (int i = 0; i < arcade::SIDES; i++) {
+                LONG s = shared->sideSerial[i];
+                if (!(shared->sideWanted & (1 << i)) || (s & 1)) { slot->sideValid[i] = false; continue; }  // no picture, or being written
+                if (slot->sideValid[i] && slot->sideSerial[i] == s) continue;  // the slot already holds this one
+                memcpy(slot->mapped + SIDES_OFFSET + size_t(i) * IMAGE_BYTES, shared->sideFrames[i], arcade::FRAME_BYTES);
+                MemoryBarrier();
+                slot->sideValid[i] = shared->sideSerial[i] == s;  // torn by a write meanwhile: next time
+                slot->sideSerial[i] = s;
+            }
+        }
         if (ok && targets[POSTER_TURNED].active) {  // the second image: the frame turned for that display
             uint8_t* turnedImage = slot->mapped + IMAGE_BYTES;
             for (UINT y = 0; y < arcade::HEIGHT; y++)
@@ -306,7 +324,16 @@ void recordAndSubmit(ID3D12CommandQueue* q) {  // caller holds m
     if (!ready) return;
     Target* live[TARGETS];
     int count = 0;
-    for (auto& t : targets) if (t.active && t.resource && (t.image != HQ || ready->hqValid)) live[count++] = &t;
+    auto sidesPending = [&](const Target& t) {
+        for (int i = 0; i < arcade::SIDES; i++) if (ready->sideValid[i] && ready->sideSerial[i] != t.sideUploaded[i]) return true;
+        return false;
+    };
+    for (auto& t : targets) {
+        if (!t.active || !t.resource) continue;
+        if (t.image == HQ && !ready->hqValid) continue;
+        if (t.image == SIDE && !sidesPending(t)) continue;
+        live[count++] = &t;
+    }
     if (!count) return;
     if (FAILED(ready->allocator->Reset())) return;
     ownCall = true;
@@ -315,6 +342,20 @@ void recordAndSubmit(ID3D12CommandQueue* q) {  // caller holds m
     for (int i = 0; i < count; i++) {
         Target& t = *live[i];
         transition(list, t.resource, t.state, D3D12_RESOURCE_STATE_COPY_DEST);
+        if (t.image == SIDE) {  // each changed side frame into its slice
+            for (int k = 0; k < arcade::SIDES; k++) {
+                if (!ready->sideValid[k] || ready->sideSerial[k] == t.sideUploaded[k]) continue;
+                D3D12_TEXTURE_COPY_LOCATION dst{t.resource, D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX};
+                dst.SubresourceIndex = UINT(k);
+                D3D12_TEXTURE_COPY_LOCATION src{ready->upload, D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT};
+                src.PlacedFootprint.Offset = SIDES_OFFSET + UINT64(k) * IMAGE_BYTES;
+                src.PlacedFootprint.Footprint = {t.desc.Format, arcade::WIDTH, arcade::HEIGHT, 1, ROW_PITCH};
+                list->CopyTextureRegion(&dst, t.x, t.y, 0, &src, nullptr);
+                t.sideUploaded[k] = ready->sideSerial[k];
+            }
+            transition(list, t.resource, D3D12_RESOURCE_STATE_COPY_DEST, t.state);
+            continue;
+        }
         D3D12_TEXTURE_COPY_LOCATION dst{t.resource, D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX};
         dst.SubresourceIndex = 0;
         D3D12_TEXTURE_COPY_LOCATION src{ready->upload, D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT};
@@ -447,6 +488,13 @@ void setPosterHqActive(bool a) {
 }
 
 bool posterHqTextureReady() { return targets[POSTER_HQ].fast.load() != nullptr; }
+void setSidesActive(bool active) {
+    if (targets[SIDES_T].active.exchange(active) != active) {
+        if (active) { std::lock_guard<std::mutex> lock(m); for (auto& u : targets[SIDES_T].sideUploaded) u = -1; }
+        logf("stream: side posters %s (texture %s)", active ? "docked, streaming" : "undocked, stopped", targets[SIDES_T].fast.load() ? "ready" : "NOT CREATED YET");
+    }
+}
+bool sidesTextureReady() { return targets[SIDES_T].fast.load() != nullptr; }
 
 void setTurnedActive(bool a, PosterTurn t) {
     uint32_t packed = (uint32_t(uint8_t(int8_t(t.ur))) << 24) | (uint32_t(uint8_t(int8_t(t.ud))) << 16) | (uint32_t(uint8_t(int8_t(t.vr))) << 8) | uint32_t(uint8_t(int8_t(t.vd)));

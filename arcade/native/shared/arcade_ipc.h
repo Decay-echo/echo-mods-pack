@@ -25,6 +25,7 @@ constexpr uint32_t FRAME_BUFFERS = 3;
 constexpr uint32_t HQ_WIDTH = 2 * WIDTH, HQ_HEIGHT = 2 * HEIGHT, HQ_PITCH = 2 * PITCH, HQ_FRAME_BYTES = HQ_PITCH * HQ_HEIGHT;
 constexpr uint32_t TOUCH_RING = 256;
 constexpr uint32_t NO_FRAME = 0xffffffffu;
+constexpr int SIDES = 4;  // the four small posters beside the lobby's news board
 
 // TouchUp/Down: a tablet touch cell. Point*: a finger on the docked lobby poster, at a
 // screen pixel. Shot: a bullet from the player's gun hit the docked poster (light gun).
@@ -108,6 +109,13 @@ struct Shared {
     volatile LONG hqFrameSerial;
     volatile LONG hqReadingFrame;   // game -> host: the 2x buffer being copied, NO_FRAME if none
     alignas(4096) uint8_t hqFrames[FRAME_BUFFERS][HQ_FRAME_BYTES];
+
+    // ---- the side posters (after the 2x ring, so everything above keeps its offset): one frame
+    // each, written by the host under a seqlock (the serial is odd while it writes) ----
+    volatile LONG sideWanted;       // host -> game: bit i = side i has a picture (0: the posters show the arcade)
+    volatile LONG sideSerial[SIDES];
+    LONG reserved2[3];
+    alignas(4096) uint8_t sideFrames[SIDES][FRAME_BYTES];
 };
 #pragma warning(pop)
 

@@ -26,6 +26,10 @@ POSTER_TURNED_W, POSTER_TURNED_H = 1248, 612
 # The high-quality poster screen: the same layout at 2x (a 2048 x 1148 frame), its own texture.
 POSTER_HQ_W, POSTER_HQ_H = 2 * POSTER_TEX_W, 2 * POSTER_TEX_H
 POSTER_HQ_X0, POSTER_HQ_Y0 = 2 * POSTER_X0, 2 * POSTER_Y0
+# The side posters: the four small posters beside the social lobby's news board share one
+# model and each samples its own slice of the model's texture, so four different pictures
+# need one texture with four slices (the poster layout, one frame a slice).
+SIDES = 4
 
 
 def tab_rect(slot):

@@ -8,6 +8,8 @@ namespace stream {
 void setPosterActive(bool) {}
 void setPosterHqActive(bool) {}
 bool posterHqTextureReady() { return true; }
+void setSidesActive(bool) {}
+bool sidesTextureReady() { return true; }
 void setTurnedActive(bool, PosterTurn) {}
 bool posterTextureReady() { return true; }
 }

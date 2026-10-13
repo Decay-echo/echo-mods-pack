@@ -108,6 +108,6 @@ private:
 // ---- touch model ----
 // A tablet touch cell (x, y: cell centre in screen pixels), or a finger on the docked lobby
 // poster (cell = POSTER_TOUCH + finger, exact pixel; `move` = it slid while down).
-struct Touch { int cell; bool down; int x, y; bool move = false; };
+struct Touch { int cell; bool down; int x, y; bool move = false; int side = -1; };  // side: a side poster's number (its touches), else -1
 constexpr int POSTER_TOUCH = 100000, SHOT_TOUCH = POSTER_TOUCH + 16;
 Touch touchFromCell(int cell, bool down, int cols, int rows);

@@ -29,7 +29,8 @@ W, H, COLS, ROWS = 1024, 574, 64, 36
 FRAME = W * H * 4
 HQ_FRAME = 2 * W * 4 * 2 * H
 HQ_AT = (8192 + 3 * FRAME + 16 + 4095) // 4096 * 4096   # the 2x ring, page aligned after its four words
-SIZE = HQ_AT + 3 * HQ_FRAME
+SIDES_AT = (HQ_AT + 3 * HQ_FRAME + 32 + 4095) // 4096 * 4096   # the side posters' frames, after their words
+SIZE = SIDES_AT + 4 * FRAME
 kernel = ctypes.windll.kernel32
 kernel.GetTickCount64.restype = ctypes.c_uint64
 
@@ -128,13 +129,21 @@ def snap(path):
 
 
 cmd = sys.argv[1] if len(sys.argv) > 1 else 'serve'
-a = [float(v) for v in sys.argv[2:]] if cmd not in ('snap', 'pad') else []
+a = [float(v) for v in sys.argv[2:]] if cmd not in ('snap', 'pad', 'side') else []
 if cmd == 'snap':
     snap(sys.argv[2])
 elif cmd == 'tap':
     c = cell_at(a[0], a[1]); beat(); touch(c, True); wait(0.12); touch(c, False); wait(0.2)
 elif cmd == 'hold':
     c = cell_at(a[0], a[1]); beat(); touch(c, True); wait(a[2]); touch(c, False); wait(0.2)
+elif cmd == 'side':  # python tools/fake_game.py side N OUT.png: the host's picture for side poster N (0..3)
+    n = int(sys.argv[2]); out = sys.argv[3]
+    serial = struct.unpack_from('<i', shm, HQ_AT + 3 * HQ_FRAME + 4 + 4 * n)[0]
+    data = bytes(shm[SIDES_AT + n * FRAME: SIDES_AT + (n + 1) * FRAME])
+    rows = b''.join(b'\0' + bytes(sum(([px[2], px[1], px[0]] for px in (data[y * W * 4 + x * 4: y * W * 4 + x * 4 + 4] for x in range(W))), [])) for y in range(H))
+    def chunk(kind, body): return struct.pack('>I', len(body)) + kind + body + struct.pack('>I', zlib.crc32(kind + body) & 0xffffffff)
+    png = b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', struct.pack('>IIBBBBB', W, H, 8, 2, 0, 0, 0)) + chunk(b'IDAT', zlib.compress(rows, 6)) + chunk(b'IEND', b'')
+    open(out, 'wb').write(png); print('saved', out, 'serial', serial, 'wanted', struct.unpack_from('<i', shm, HQ_AT + 3 * HQ_FRAME)[0])
 elif cmd == 'mode':
     struct.pack_into('<i', shm, PAGE_MODE, int(a[0])); wait(0.3)
 elif cmd == 'poster':

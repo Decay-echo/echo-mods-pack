@@ -170,7 +170,9 @@ struct Dock {
     unsigned index = 0;
     U actor = 0, handle = 0, savedName = NONE, savedKey = NONE;
     unsigned mesh = 0;
-    U texture = 0;       // the arcade texture it shows: the usual one, or the turned one
+    U texture = 0;       // the arcade texture it shows: the usual one, the turned one, or the sides' array
+    bool side = false;   // one of the four small posters, on its own slice of the sides' texture
+    unsigned slice = 0;  // the slice it samples (a side: 0..3; else the item's own art slice)
     Xform level, space;  // poster in its level, level in the world
     std::vector<Xform> faces;
 };
@@ -220,6 +222,13 @@ bool hasFace(unsigned mesh) { return mesh != POSTER_NO_MESH; }
 // They are the first posters a player meets coming out of the staging area, and the user wants
 // them left as they are.
 constexpr uint64_t BANNER_MODELS[] = {0xea17a1c953a43e21};
+// The four small posters beside the social lobby's news board share this model and each samples
+// its own slice of the model's texture; with the host's side pictures (shared->sideWanted) they
+// get the sides' four-slice texture, one slice each, in the order top-left, top-right,
+// bottom-left, bottom-right.
+constexpr uint64_t SIDES_MODEL = 0xf017b9c945a43e21;
+bool sidesModel(unsigned mesh) { return mesh != POSTER_NO_MESH && POSTER_MODELS[mesh] == SIDES_MODEL; }
+LONG lastSideWanted = 0;
 bool banner(unsigned mesh) {
     if (mesh == POSTER_NO_MESH) return false;
     for (uint64_t m : BANNER_MODELS)
@@ -269,16 +278,18 @@ LONG dockedState() { return docks.empty() ? arcade::Undocked : arcade::Docked; }
 
 // Tells the stream which poster textures to feed: the usual one, the turned one, or neither.
 void syncStream() {
-    bool usual = false, hq = false, turnedAny = false;
+    bool usual = false, hq = false, turnedAny = false, sides = false;
     PosterTurn turn = POSTER_UPRIGHT;
     for (auto& d : docks) {
-        if (turned(turnOf(d.mesh))) { turnedAny = true; turn = turnOf(d.mesh); }
+        if (d.side) sides = true;
+        else if (turned(turnOf(d.mesh))) { turnedAny = true; turn = turnOf(d.mesh); }
         else if (d.texture == ARCADE_POSTER_HQ_TEXTURE) hq = true;
         else usual = true;
     }
     stream::setPosterActive(usual);
     stream::setPosterHqActive(hq);
     stream::setTurnedActive(turnedAny, turn);
+    stream::setSidesActive(sides);
 }
 
 void releaseFingers();
@@ -361,6 +372,7 @@ void undockAll(const char* why) {
     stream::setPosterActive(false);  // no copies into the textures from here on
     stream::setPosterHqActive(false);
     stream::setTurnedActive(false, POSTER_UPRIGHT);
+    stream::setSidesActive(false);
     releaseFingers();
     for (auto it = docks.rbegin(); it != docks.rend(); ++it) {
         if (!slotStill(*it)) continue;
@@ -372,16 +384,22 @@ void undockAll(const char* why) {
     answer(arcade::Undocked, "%s", why);
 }
 
+int dockSides(void* cs, Xform space);
+
 // Puts the arcade on poster slot `slot` of system `cs`, keeping the posters already docked.
-// Returns 0, or the engine's error from OverrideTexture.
-int dockSlot(void* cs, unsigned slot, Xform space) {
+// Returns 0, or the engine's error from OverrideTexture. `sideSlice` >= 0: one of the four
+// side posters, on that slice of the sides' texture.
+int dockSlot(void* cs, unsigned slot, Xform space, int sideSlice = -1) {
     void* gs = at<void*>(cs, 0x80);
     P keys = at<P>(cs, 0x108);
     const PosterInfo& info = POSTERS[posterOf(gs, at<U>(keys, size_t(slot) * 16))];
+    if (sideSlice < 0 && sidesModel(info.mesh) && shared->sideWanted) return dockSides(cs, space);
     P item = at<P>(cs, 0x100) + size_t(slot) * POSTER_STRIDE;
     Dock d;
     d.cs = cs; d.gs = gs; d.index = slot; d.actor = info.actor; d.handle = at<U>(keys, size_t(slot) * 16); d.mesh = info.mesh;
-    d.texture = turned(turnOf(info.mesh)) ? ARCADE_POSTER_TURNED_TEXTURE : shared->posterHq ? ARCADE_POSTER_HQ_TEXTURE : ARCADE_POSTER_TEXTURE;
+    d.texture = sideSlice >= 0 ? ARCADE_SIDES_TEXTURE : turned(turnOf(info.mesh)) ? ARCADE_POSTER_TURNED_TEXTURE : shared->posterHq ? ARCADE_POSTER_HQ_TEXTURE : ARCADE_POSTER_TEXTURE;
+    d.side = sideSlice >= 0;
+    d.slice = d.side ? unsigned(sideSlice) : at<unsigned>(item, 4);
     d.level = placement(info);
     d.space = space;
     d.faces.push_back(d.level);
@@ -395,8 +413,9 @@ int dockSlot(void* cs, unsigned slot, Xform space) {
     at<U>(item, 0x48) = NONE;  // stop the server's poster from being resolved back in
     at<U>(item, 0x08) = d.texture;
     U key[2] = {at<U>(keys, size_t(slot) * 16), at<U>(keys, size_t(slot) * 16 + 8)};
-    // Its own art slice, as the engine passes (slice -1 drew the docked poster black).
-    int r = overrideTexture(cs, key, item, at<unsigned>(item, 4));
+    // Its own art slice, as the engine passes (slice -1 drew the docked poster black); a side
+    // poster takes its slice of the sides' texture.
+    int r = overrideTexture(cs, key, item, d.slice);
     if (r != 0) {
         restoreArt(cs, slot, NONE, d.savedKey);  // as the engine does when a poster fails to load
         refused.insert(info.actor);
@@ -412,6 +431,73 @@ int dockSlot(void* cs, unsigned slot, Xform space) {
          d.texture == ARCADE_POSTER_TURNED_TEXTURE ? " (picture turned for this display)" : d.texture == ARCADE_POSTER_HQ_TEXTURE ? " (high quality)" : "");
     syncStream();
     return 0;
+}
+
+// The four side posters of `cs`: each docked on its own slice (top-left, top-right, bottom-left,
+// bottom-right in the world). Returns 0 when at least one took it.
+int dockSides(void* cs, Xform space) {
+    void* gs = at<void*>(cs, 0x80);
+    P keys = at<P>(cs, 0x108);
+    unsigned count = at<unsigned short>(cs, 0xfc);
+    struct Side { unsigned slot; Vec center; };
+    std::vector<Side> sides;
+    for (unsigned i = 0; i < count && keys; i++) {
+        int which = posterOf(gs, at<U>(keys, size_t(i) * 16));
+        if (which < 0 || !sidesModel(POSTERS[which].mesh) || refused.count(POSTERS[which].actor)) continue;
+        bool docked = false;
+        for (auto& d : docks) if (d.cs == cs && d.index == i) docked = true;
+        if (docked) continue;
+        sides.push_back({i, centerOf(POSTERS[which], space)});
+    }
+    if (sides.empty()) return -1;
+    float midY = 0;
+    for (auto& s : sides) midY += s.center.y;
+    midY /= float(sides.size());
+    std::sort(sides.begin(), sides.end(), [midY](const Side& a, const Side& b) {
+        bool topA = a.center.y >= midY, topB = b.center.y >= midY;
+        if (topA != topB) return topA;        // the top row first
+        return a.center.x < b.center.x;       // left before right
+    });
+    int ok = -1;
+    for (size_t k = 0; k < sides.size() && k < size_t(ARCADE_SIDES); k++) {
+        int r = dockSlot(cs, sides[k].slot, space, int(k));
+        if (r == 0) ok = 0;
+        logf("posters: side %zu = slot %u at %.1f %.1f %.1f (%s)", k, sides[k].slot, sides[k].center.x, sides[k].center.y, sides[k].center.z, r == 0 ? "docked" : "refused");
+    }
+    return ok;
+}
+
+// The host switched its side pictures on or off while the small posters are docked: they are
+// docked again the other way (four slices, or the one arcade picture on all of them).
+void syncSides() {
+    LONG wanted = shared->sideWanted;
+    if (wanted == lastSideWanted) return;
+    lastSideWanted = wanted;
+    for (size_t k = 0; k < docks.size();) {
+        Dock& d = docks[k];
+        if (!sidesModel(d.mesh) || d.side == (wanted != 0)) { k++; continue; }
+        void* cs = d.cs;
+        unsigned index = d.index;
+        Xform space = d.space;
+        if (slotStill(d)) restoreArt(cs, index, d.savedName, d.savedKey);
+        docks.erase(docks.begin() + long(k));
+        bool any = false;
+        for (auto& o : docks) any = any || o.cs == cs;
+        if (!any) {
+            syncStream();
+            if (wanted) dockSides(cs, space);
+            else {
+                void* gs = at<void*>(cs, 0x80);
+                P keys = at<P>(cs, 0x108);
+                for (unsigned i = 0, count = at<unsigned short>(cs, 0xfc); i < count && keys; i++) {
+                    int which = posterOf(gs, at<U>(keys, size_t(i) * 16));
+                    if (which >= 0 && sidesModel(POSTERS[which].mesh) && !refused.count(POSTERS[which].actor)) { dockSlot(cs, i, space); break; }
+                }
+            }
+            answer(dockedState(), "Docked on %zu poster(s).", docks.size());
+        }
+    }
+    syncStream();
 }
 
 // Engine thread, inside the touch-button Update: DOCK requests (AUTO DOCK sends one every ~2 s).
@@ -549,7 +635,7 @@ void maintain() {
             d.savedName = at<U>(item, 0x08);
             at<U>(item, 0x08) = d.texture;
             U key[2] = {at<U>(at<P>(d.cs, 0x108), size_t(d.index) * 16), at<U>(at<P>(d.cs, 0x108), size_t(d.index) * 16 + 8)};
-            int r = overrideTexture(d.cs, key, item, at<unsigned>(item, 4));
+            int r = overrideTexture(d.cs, key, item, d.slice);
             if (r != 0) {
                 at<U>(item, 0x08) = d.savedName;
                 logf("posters: the server replaced %016llx (%d); that one is undocked", d.actor, r);
@@ -573,6 +659,7 @@ void tick(U now) {
     for (void* cs : systems)
         if (at<unsigned short>(cs, 0xfc) && described.insert(cs).second) describe(cs);  // once it has its posters
     maintain();
+    syncSides();
     restoreRemembered();
     handleRequest(now);
 }
@@ -581,7 +668,8 @@ void tick(U now) {
 struct Hands { Vec tip[2]; bool valid[2] = {}; void* gs = nullptr; U tick = 0; };
 std::map<void*, Hands> hands;   // by button system
 void* touchSource = nullptr;    // the button system whose fingertips drive the docked poster
-struct Finger { bool down = false; int x = 0, y = 0; };
+struct Finger { bool down = false; int x = 0, y = 0; int side = -1; };
+uint32_t touchCell(unsigned finger, int side) { return finger | (uint32_t(side + 1) << 8); }  // the host reads the side back out
 Finger fingers[2];
 
 bool playerPosition(void* gs, U now, Vec& out) {
@@ -597,7 +685,7 @@ bool playerPosition(void* gs, U now, Vec& out) {
 
 void releaseFingers() {
     for (unsigned i = 0; i < 2; i++)
-        if (fingers[i].down) { arcade::pushTouch(shared, i, arcade::PointUp, fingers[i].x, fingers[i].y); fingers[i].down = false; }
+        if (fingers[i].down) { arcade::pushTouch(shared, touchCell(i, fingers[i].side), arcade::PointUp, fingers[i].x, fingers[i].y); fingers[i].down = false; }
 }
 
 // ---- hooks ----
@@ -627,7 +715,7 @@ void* destroy(void* cs, unsigned flags) {
         size_t before = docks.size();
         docks.erase(std::remove_if(docks.begin(), docks.end(), [cs](const Dock& d) { return d.cs == cs; }), docks.end());
         if (docks.size() != before) {
-            if (docks.empty()) { stream::setPosterActive(false); stream::setPosterHqActive(false); releaseFingers(); }  // before the level frees anything
+            if (docks.empty()) { stream::setPosterActive(false); stream::setPosterHqActive(false); stream::setSidesActive(false); releaseFingers(); }  // before the level frees anything
             answer(dockedState(), docks.empty() ? "Left the lobby; the arcade comes back on its posters when you return." : "Docked on %zu poster(s).", docks.size());
         }
     }
@@ -637,12 +725,15 @@ void* destroy(void* cs, unsigned flags) {
 float lastFace = 1e9f, lastFront = 0;  // the last contact() test: metres from the face, and in front of it
 
 // Where a fingertip touches a poster showing the arcade: pixel, or false when not touching.
-bool contact(Vec tip, bool wasDown, int& x, int& y) {
+bool contact(Vec tip, bool wasDown, int& x, int& y, int& side) {
     float best = 1e9f, bestSigned = 0, u = 0, v = 0;
     unsigned bestMesh = POSTER_NO_MESH;
+    side = -1;
     for (const Dock& dock : docks)
     for (const Xform& face : dock.faces) {
         if (!hasFace(dock.mesh)) break;
+        // a side poster: only its own face (its siblings are docks of their own)
+        if (dock.side && !(face.t.x == dock.level.t.x && face.t.y == dock.level.t.y && face.t.z == dock.level.t.z)) continue;
         Vec local = face.unapply(dock.space.unapply(tip));
         float scale = face.s * dock.space.s;
         for (auto& t : meshes[dock.mesh].tris) {
@@ -654,6 +745,7 @@ bool contact(Vec tip, bool wasDown, int& x, int& y) {
                 best = distance;
                 bestSigned = dot(local - p, t.n) * scale;
                 bestMesh = dock.mesh;
+                side = dock.side ? int(dock.slice) : -1;
                 interpolate(t, wa, wb, wc, u, v);
             }
         }
@@ -664,6 +756,10 @@ bool contact(Vec tip, bool wasDown, int& x, int& y) {
     float front = wasDown ? .04f : .015f;
     if (!(bestSigned < front && bestSigned > -.08f && best < .12f)) return false;
     return toPixel(u, v, bestMesh, x, y);
+}
+bool contact(Vec tip, bool wasDown, int& x, int& y) {  // without the side (the tests)
+    int side = -1;
+    return contact(tip, wasDown, x, y, side);
 }
 
 void afterButton(void* cs, U now) {
@@ -694,24 +790,24 @@ void afterButton(void* cs, U now) {
     if (touchSource != cs) return;
     for (unsigned i = 0; i < 2; i++) {
         Finger& f = fingers[i];
-        int x = 0, y = 0;
-        bool on = h.valid[i] && contact(h.tip[i], f.down, x, y);
+        int x = 0, y = 0, side = -1;
+        bool on = h.valid[i] && contact(h.tip[i], f.down, x, y, side);
         static U lastNear = 0;
         if (h.valid[i] && !on && lastFace < .5f && now - lastNear > 2000) {
             lastNear = now;
             logf("posters: finger %u near the poster but not touching: %.3f m from the face, %.3f m in front", i, lastFace, lastFront);
         }
         if (on && !f.down) {
-            f = {true, x, y};
-            arcade::pushTouch(shared, i, arcade::PointDown, x, y);
+            f = {true, x, y, side};
+            arcade::pushTouch(shared, touchCell(i, side), arcade::PointDown, x, y);
             static int logged = 0;
-            if (logged++ < 5) logf("posters: finger %u touched the poster at pixel %d,%d", i, x, y);
+            if (logged++ < 5) logf("posters: finger %u touched %s at pixel %d,%d", i, side >= 0 ? "a side poster" : "the poster", x, y);
         } else if (on && (std::abs(x - f.x) >= 2 || std::abs(y - f.y) >= 2)) {
             f.x = x; f.y = y;
-            arcade::pushTouch(shared, i, arcade::PointMove, x, y);
+            arcade::pushTouch(shared, touchCell(i, f.side), arcade::PointMove, x, y);
         } else if (!on && f.down) {
             f.down = false;
-            arcade::pushTouch(shared, i, arcade::PointUp, f.x, f.y);
+            arcade::pushTouch(shared, touchCell(i, f.side), arcade::PointUp, f.x, f.y);
         }
     }
 }

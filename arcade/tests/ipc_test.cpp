@@ -20,7 +20,8 @@ int main() {
     static_assert(offsetof(arcade::Shared, dockState) == 192 && offsetof(arcade::Shared, shots) == 196);
     static_assert(offsetof(arcade::Shared, dockText) == 200 && offsetof(arcade::Shared, touches) == 296);
     static_assert(offsetof(arcade::Shared, frames) == 8192 && offsetof(arcade::Shared, posterHq) == 8192 + 3 * 2351104);
-    static_assert(offsetof(arcade::Shared, hqFrames) == 7065600 && sizeof(arcade::Shared) == 7065600 + 3 * 9404416);  // tools/fake_game.py HQ_AT and SIZE
+    static_assert(offsetof(arcade::Shared, hqFrames) == 7065600 && offsetof(arcade::Shared, sideFrames) == 35282944);  // tools/fake_game.py HQ_AT and SIDES_AT
+    static_assert(sizeof(arcade::Shared) == 44687360);  // tools/fake_game.py SIZE
     static_assert(offsetof(arcade::Shared, controllerWant) == 4392 && offsetof(arcade::Shared, controllerLevel) == 4396);
     static_assert(offsetof(arcade::Shared, controllerState) == 4400 && offsetof(arcade::Shared, levelSerial) == 4404);
     static_assert(offsetof(arcade::Shared, padSerial) == 4408 && offsetof(arcade::Shared, padTick) == 4416);

@@ -36,7 +36,7 @@ from build_tools_tab import empty_canvas, ROOT_CANVAS, NAV_CANVAS, LEVEL, ACTOR 
 from arcade_layout import (PAGE_W, PAGE_H, PAGE_X, PAGE_Y, SCREEN_RECT, TEX_W, TEX_H,  # noqa: E402
                            GRID_COLS, GRID_ROWS, TAB_SLOT_CENTERS, ARCADE_SLOT, STOCK_SLOTS, DISCORD_SLOT,
                            SETTINGS_SLOT, POSTER_TEX_W, POSTER_TEX_H, POSTER_X0, POSTER_Y0, POSTER_TURNED_W, POSTER_TURNED_H,
-                           POSTER_HQ_W, POSTER_HQ_H,
+                           POSTER_HQ_W, POSTER_HQ_H, SIDES,
                            tab_rect, splash_bgra)
 import build_poster_table  # noqa: E402
 from tab_icon import tab_icons  # noqa: E402
@@ -50,6 +50,7 @@ TEXTURE = P.sym('echo_arcade_screen_v1')
 POSTER_TEXTURE = P.sym('echo_arcade_poster_screen_v1')
 POSTER_TURNED_TEXTURE = P.sym('echo_arcade_poster_turned_v1')  # for displays whose art is stored turned
 POSTER_HQ_TEXTURE = P.sym('echo_arcade_poster_hq_v1')          # the poster screen at 2x (poster quality HIGH)
+SIDES_TEXTURE = P.sym('echo_arcade_sides_v1')                   # the side posters: a four-slice array, one picture each
 ICON_TEXTURE = P.sym('echo_arcade_tab_icon_texture_v1')
 TAB_BUTTON = P.sym('echo_arcade_tab_button_v1')
 SETTINGS_BUTTON = P.sym('echo_arcade_settings_button_v1')
@@ -86,6 +87,22 @@ def texture_pair(stock, w, h, pixels, fmt=DXGI_B8G8R8A8_UNORM_SRGB):
     struct.pack_into('<II', cpu, 0xf4, len(dds) + size, pitch)
     assert len(pixels) == size
     return bytes(cpu), bytes(dds) + pixels
+
+
+def texture_array(stock, w, h, slices, fmt=DXGI_B8G8R8A8_UNORM_SRGB):
+    """Like texture_pair, as a texture array of `slices` dark pictures (one mip each). The
+    stock poster atlases keep their slice count at cpu +0xd0 (and 1 at +0xdc/+0xe0) and in the
+    DDS DX10 header's arraySize; the slices' pixels follow one another."""
+    cpu, gpu = texture_pair(stock, w, h, poster_bgra(w, h, splash=False), fmt)
+    cpu = bytearray(cpu)
+    dds = bytearray(gpu[:148])
+    pixels = gpu[148:]
+    struct.pack_into('<I', cpu, 0xd0, slices)
+    struct.pack_into('<II', cpu, 0xdc, 1, 1)
+    struct.pack_into('<II', cpu, 0xf4, len(dds) + len(pixels) * slices, w * 4)
+    struct.pack_into('<I', dds, 140, slices)
+    struct.pack_into('<I', dds, 108, struct.unpack_from('<I', dds, 108)[0] | 0x8)  # DDSCAPS_COMPLEX, as the atlases
+    return bytes(cpu), bytes(dds) + pixels * slices
 
 
 def atlas_image(stock):
@@ -257,7 +274,7 @@ def build():
                         (0, PAGE_H - 34, PAGE_W, PAGE_H), 18, hidden=True, capacity=96)
     # Never drawn: hold the poster textures for as long as the tablet exists (DOCK).
     for name, texture in (('echo_arcade_poster_keepalive_v1', POSTER_TEXTURE), ('echo_arcade_poster_turned_keepalive_v1', POSTER_TURNED_TEXTURE),
-                          ('echo_arcade_poster_hq_keepalive_v1', POSTER_HQ_TEXTURE)):
+                          ('echo_arcade_poster_hq_keepalive_v1', POSTER_HQ_TEXTURE), ('echo_arcade_sides_keepalive_v1', SIDES_TEXTURE)):
         keepalive = page.append(sprite_template, name, (0, 0, 1, 1), hidden=True)
         row = page.elements[keepalive]
         struct.pack_into('<4f', row, 0x78, 1, 1, 1, 1)
@@ -277,7 +294,7 @@ def build():
     for c in (root, nav, page):
         fix_texture_count(c)
         c.validate()
-    assert struct.unpack_from('<I', page.header, 0x28)[0] == 4 and struct.unpack_from('<I', nav.header, 0x28)[0] == 15  # screen + 3 keepalives; nav: 4 stock + 3 own tabs, idle + selected each, + the icon
+    assert struct.unpack_from('<I', page.header, 0x28)[0] == 5 and struct.unpack_from('<I', nav.header, 0x28)[0] == 15  # screen + 4 keepalives; nav: 4 stock + 3 own tabs, idle + selected each, + the icon
     assert [bytes(r) for r in root.elements[:7]] == old_root
     for i, (old, new) in enumerate(zip(old_nav, nav.elements[:9])):  # stock tabs: only their x position moved
         assert old[:0x34] == new[:0x34] and old[0x44:] == new[0x44:], f'nav element {i} changed beyond its rect'
@@ -334,6 +351,7 @@ def build():
     poster_cpu, poster_gpu = texture_pair(stock, POSTER_TEX_W, POSTER_TEX_H, poster_bgra())
     turned_cpu, turned_gpu = texture_pair(stock, POSTER_TURNED_W, POSTER_TURNED_H, poster_bgra(POSTER_TURNED_W, POSTER_TURNED_H, splash=False))
     hq_cpu, hq_gpu = texture_pair(stock, POSTER_HQ_W, POSTER_HQ_H, poster_bgra(POSTER_HQ_W, POSTER_HQ_H, splash=False))
+    sides_cpu, sides_gpu = texture_array(stock, POSTER_TEX_W, POSTER_TEX_H, SIDES)
     for level, blob in news_board_posters(stock):
         patcher.add_item('CR15NetDynamicPosterCR', False, f'0x{level:016x}', blob)
     patcher.add_item('CUICanvasResource', False, f'0x{ROOT_CANVAS:016x}', root.serialize())
@@ -350,6 +368,8 @@ def build():
     patcher.add_item('CGTextureResource', True, f'0x{POSTER_TURNED_TEXTURE:016x}', turned_gpu)
     patcher.add_item('CGTextureResource', False, f'0x{POSTER_HQ_TEXTURE:016x}', hq_cpu)
     patcher.add_item('CGTextureResource', True, f'0x{POSTER_HQ_TEXTURE:016x}', hq_gpu)
+    patcher.add_item('CGTextureResource', False, f'0x{SIDES_TEXTURE:016x}', sides_cpu)
+    patcher.add_item('CGTextureResource', True, f'0x{SIDES_TEXTURE:016x}', sides_gpu)
     while (GAME_PACKAGES / f'{MID}_{patcher.mf.npkg}').exists():
         i = patcher.mf.npkg
         patcher.mf.C.append([i, (GAME_PACKAGES / f'{MID}_{i}').stat().st_size, 0, 0])
@@ -377,7 +397,8 @@ def build():
                 grid=[GRID_COLS, GRID_ROWS], texture_size=[TEX_W, TEX_H],
                 poster_texture=f'{POSTER_TEXTURE:016x}', poster_texture_size=[POSTER_TEX_W, POSTER_TEX_H],
                 poster_turned_texture=f'{POSTER_TURNED_TEXTURE:016x}', poster_turned_texture_size=[POSTER_TURNED_W, POSTER_TURNED_H],
-                poster_hq_texture=f'{POSTER_HQ_TEXTURE:016x}', poster_hq_texture_size=[POSTER_HQ_W, POSTER_HQ_H])
+                poster_hq_texture=f'{POSTER_HQ_TEXTURE:016x}', poster_hq_texture_size=[POSTER_HQ_W, POSTER_HQ_H],
+                sides_texture=f'{SIDES_TEXTURE:016x}', sides=SIDES)
     (OUT / 'arcade_tab.json').write_text(json.dumps(meta, indent=2))
 
     GENERATED.mkdir(parents=True, exist_ok=True)
@@ -397,6 +418,7 @@ def build():
         f'constexpr unsigned ARCADE_TEX_W={TEX_W}, ARCADE_TEX_H={TEX_H};\n'
         f'constexpr uint64_t ARCADE_POSTER_TEXTURE=0x{POSTER_TEXTURE:016x}, ARCADE_POSTER_TURNED_TEXTURE=0x{POSTER_TURNED_TEXTURE:016x};\n'
         f'constexpr uint64_t ARCADE_POSTER_HQ_TEXTURE=0x{POSTER_HQ_TEXTURE:016x};\n'
+        f'constexpr uint64_t ARCADE_SIDES_TEXTURE=0x{SIDES_TEXTURE:016x};\nconstexpr unsigned ARCADE_SIDES={SIDES};\n'
         f'constexpr uint64_t ARCADE_CELLS[]={{{cells}}};\n')
     print(f'Built ARCADE tab: {len(patcher.items)} resources in {package_name}, '
           f'{GRID_COLS}x{GRID_ROWS} touch grid, {TEX_W}x{TEX_H} BGRA screen, {POSTER_TEX_W}x{POSTER_TEX_H} poster screen.')

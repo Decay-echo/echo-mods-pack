@@ -23,5 +23,8 @@ bool posterHqTextureReady();
 // into its own texture, turned to stand upright on it.
 void setTurnedActive(bool active, PosterTurn turn);
 bool posterTextureReady();             // the engine has created the poster texture
+// The side posters' four-slice texture: each slice gets the host's side frame of that number.
+void setSidesActive(bool active);
+bool sidesTextureReady();
 void shutdown();
 }
