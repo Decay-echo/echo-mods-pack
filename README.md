@@ -22,6 +22,8 @@ To remove everything, close Echo VR and double-click **`UNINSTALL.cmd`** (or, in
 
 Only want one of them? `INSTALL.cmd --no-arcade` (HUD only) or `INSTALL.cmd --no-hud` (arcade only).
 
+**Something not showing up in the game?** Start Echo VR once, open the tablet, close Echo, then double-click **`CHECK.cmd`**: it writes `check.txt` (what is installed, whether EchoLoader loaded the plugins, the mods' own logs, antivirus detections). Paste that file when asking for help.
+
 ## Using it
 
 **Performance.** The HUD paints on a thread of its own and costs Echo's render thread about 50 microseconds a frame. If Echo stutters with the pack installed, look at `%LOCALAPPDATA%\EchoHudPlus\hudplus.log`: once a minute it says how long the HUD took.

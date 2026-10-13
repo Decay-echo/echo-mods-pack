@@ -10,3 +10,4 @@ hud_lines/patch/
 # The pack's zip (a release download, not part of the repo)
 /dist/
 __pycache__/
+check.txt

@@ -2,6 +2,7 @@
 
     INSTALL.cmd     python install_pack.py
     UNINSTALL.cmd   python install_pack.py --uninstall
+    CHECK.cmd       python install_pack.py --check      (what is installed and whether it runs: paste check.txt when asking for help)
 
 Options: --game PATH   your ready-at-dawn-echo-arena folder (found by itself in the usual places)
          --no-arcade   only the HUD
@@ -20,6 +21,7 @@ import os
 import struct
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -186,6 +188,103 @@ def install(args):
         print('   Your games go in ' + str(ARCADE / 'apps' / 'roms') + ' (one folder per system, see the README there).')
 
 
+def tail(path: Path, n=12):
+    try:
+        lines = path.read_text(encoding='utf-8', errors='replace').splitlines()
+    except OSError:
+        return None
+    return lines[-n:]
+
+
+def check(args):
+    """What is in the game and whether it ran: for pasting when something does not show up."""
+    g = game_helpers()
+    out = []
+
+    def say(text=''):
+        print(text)
+        out.append(text)
+
+    say('ECHO MODS PACK - CHECK  (' + time.strftime('%Y-%m-%d %H:%M') + ')')
+    say('pack: ' + str(HERE))
+    game = find_game(args.game, g)
+    win10 = game / 'bin' / 'win10'
+    say('game: ' + str(game))
+    say('Echo VR running now: ' + ('yes (start it and open the tablet, then close it and run this again)' if g.game_running() else 'no'))
+    say('')
+    say('[EchoLoader]')
+    loader = win10 / 'echoloader.json'
+    say('  dbgcore.dll: ' + ('present' if (win10 / 'dbgcore.dll').is_file() else 'MISSING (EchoLoader is not installed)'))
+    try:
+        cfg = json.loads(loader.read_text(encoding='utf-8'))
+        say('  echoloader.json plugins: ' + ', '.join(p.get('file', '?') for p in cfg.get('plugins', []) if isinstance(p, dict)))
+    except (OSError, ValueError) as e:
+        say(f'  echoloader.json: cannot read ({e})')
+    for name in ('EchoArcade.dll', 'EchoHudPlus.dll', 'NvrAssetPatches.dll'):
+        f = win10 / 'plugins' / name
+        say(f'  plugins\\{name}: ' + (f'{f.stat().st_size} bytes' if f.is_file() else 'MISSING (quarantined by an antivirus, or never installed)'))
+    log = win10 / 'plugin_logs' / 'loader.log'
+    lines = tail(log, 400)
+    if lines is None:
+        say('  loader.log: none (Echo VR has not started with EchoLoader since the install, or EchoLoader is not running)')
+    else:
+        starts = [i for i, l in enumerate(lines) if 'Loading plugin:' in l]
+        last = lines[max(0, starts[0] - 5):] if starts else lines[-20:]
+        # the last start of Echo: from its first "Loading plugin" to its summary
+        session = []
+        for l in reversed(lines):
+            session.append(l)
+            if '===' in l and 'EchoLoader' in l and 'Summary' not in l:
+                break
+        session = list(reversed(session))[-40:]
+        summary = [l for l in lines if 'Summary' in l]
+        say('  loader.log, last start: ' + (summary[-1].strip() if summary else '(no summary line)'))
+        for l in session:
+            if any(k in l for k in ('FAIL', 'fail', 'error', 'Error', 'skipped', 'Loading plugin', 'Summary', 'echovr')):
+                say('    ' + l.strip()[:160])
+    say('')
+    say('[the mods\' own logs]')
+    local = Path(os.environ.get('LOCALAPPDATA', ''))
+    for label, path in (('HUD', local / 'EchoHudPlus' / 'hudplus.log'), ('arcade plugin', local / 'EchoArcade' / 'runtime.log'),
+                        ('arcade host', local / 'EchoArcade' / 'host.log')):
+        lines = tail(path, 6)
+        if lines is None:
+            say(f'  {label}: no log at {path} (it never ran)')
+        else:
+            say(f'  {label}: {path}')
+            for l in lines:
+                say('    ' + l.strip()[:160])
+    say('')
+    say('[tablet data]')
+    try:
+        sys.path.insert(0, str(ARCADE / 'tools'))
+        import install as arcade_install
+        p = arcade_install.paths(game)
+        pr, mf_cls = arcade_install.probe(game)
+        data = p['manifest'].read_bytes()
+        has, mf = arcade_install.arcade_in(data, pr, mf_cls)
+        say(f'  manifest: {mf.npkg} packages (stock has 3), Echo Arcade tab: {"yes" if has else "NO"}')
+        say('  packages: ' + ', '.join(sorted(f.name for f in p['packages'].glob('48037dc70b0ecab2*'))))
+    except Exception as e:  # noqa: BLE001
+        say('  not read: the Echo package tools are not in this copy (INSTALL downloads them)' if 'echovr_pkg' in str(e)
+            else f'  could not read the tablet data: {e}')
+    say('')
+    say('[antivirus]')
+    try:
+        r = subprocess.run(['powershell', '-NoProfile', '-Command',
+                            'Get-MpThreatDetection | Sort-Object InitialDetectionTime -Descending | Select-Object -First 8 | '
+                            'ForEach-Object { $_.InitialDetectionTime.ToString("s") + "  " + ($_.Resources -join ", ") }'],
+                           capture_output=True, text=True, timeout=60)
+        hits = [l for l in r.stdout.splitlines() if l.strip()]
+        ours = [l for l in hits if any(k in l for k in ('EchoArcade', 'EchoHudPlus', 'EchoModsPack', 'ArcadeHost', 'retroarch'))]
+        say('  Defender detections touching the pack: ' + (' | '.join(ours) if ours else 'none seen' if not r.returncode else 'could not ask'))
+    except (OSError, subprocess.TimeoutExpired):
+        say('  Defender: could not ask')
+    (HERE / 'check.txt').write_text('\n'.join(out) + '\n', encoding='utf-8')
+    say('')
+    say('Written to ' + str(HERE / 'check.txt') + ': paste that file when asking for help.')
+
+
 def uninstall(args):
     g = game_helpers()
     print('ECHO MODS PACK - UNINSTALL')
@@ -209,6 +308,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--game', help='your ready-at-dawn-echo-arena folder')
     ap.add_argument('--uninstall', action='store_true')
+    ap.add_argument('--check', action='store_true', help='what is installed and whether it ran (writes check.txt)')
     ap.add_argument('--no-arcade', action='store_true', help='leave Echo Arcade out')
     ap.add_argument('--no-hud', action='store_true', help='leave the HUD out')
     ap.add_argument('--dry-run', action='store_true', help='download and prepare everything, but change nothing in the game')
@@ -220,6 +320,9 @@ def main():
         stop(f'This folder\'s path is too long for Windows ({len(str(HERE))} characters):\n  {HERE}\n'
              'Move the EchoModsPack folder somewhere shorter, for example C:\\EchoModsPack or Documents\\EchoModsPack, '
              'and run INSTALL.cmd from there.')
+    if args.check:
+        check(args)
+        return
     (uninstall if args.uninstall else install)(args)
 
 
