@@ -21,6 +21,8 @@ constexpr wchar_t CONTROLLER_EVENT[] = L"Local\\EchoArcade.ControllerMode";
 constexpr uint32_t WIDTH = 1024, HEIGHT = 574, PITCH = WIDTH * 4;
 constexpr uint32_t FRAME_BYTES = PITCH * HEIGHT;
 constexpr uint32_t FRAME_BUFFERS = 3;
+// The same picture at 2x for the high-quality poster screen (its own ring after the frames).
+constexpr uint32_t HQ_WIDTH = 2 * WIDTH, HQ_HEIGHT = 2 * HEIGHT, HQ_PITCH = 2 * PITCH, HQ_FRAME_BYTES = HQ_PITCH * HQ_HEIGHT;
 constexpr uint32_t TOUCH_RING = 256;
 constexpr uint32_t NO_FRAME = 0xffffffffu;
 
@@ -99,6 +101,13 @@ struct Shared {
     volatile LONG voiceState;       // game -> host: the mode in the game now, -1 while not known
 
     alignas(4096) uint8_t frames[FRAME_BUFFERS][FRAME_BYTES];
+
+    // ---- the 2x picture for the high-quality poster screen (host -> game) ----
+    volatile LONG posterHq;         // host -> game: 1 = new docks use the 2x poster texture
+    volatile LONG hqLatestFrame;    // index of the newest 2x frame, NO_FRAME while off
+    volatile LONG hqFrameSerial;
+    volatile LONG hqReadingFrame;   // game -> host: the 2x buffer being copied, NO_FRAME if none
+    alignas(4096) uint8_t hqFrames[FRAME_BUFFERS][HQ_FRAME_BYTES];
 };
 #pragma warning(pop)
 
@@ -117,6 +126,7 @@ inline Shared* open(HANDLE* mapping) {
         std::memset(s, 0, offsetof(Shared, frames));
         s->version = VERSION; s->width = WIDTH; s->height = HEIGHT; s->pitch = PITCH;
         s->latestFrame = LONG(NO_FRAME); s->readingFrame = LONG(NO_FRAME);
+        s->hqLatestFrame = LONG(NO_FRAME); s->hqReadingFrame = LONG(NO_FRAME);
         MemoryBarrier();
         s->magic = MAGIC;
     }
@@ -144,6 +154,19 @@ inline void publishFrame(Shared* s, uint32_t index) {
     MemoryBarrier();
     InterlockedExchange(&s->latestFrame, LONG(index));
     InterlockedIncrement(&s->frameSerial);
+}
+
+inline uint32_t writableHqFrame(Shared* s) {
+    LONG latest = s->hqLatestFrame, reading = s->hqReadingFrame;
+    for (uint32_t i = 0; i < FRAME_BUFFERS; i++)
+        if (LONG(i) != latest && LONG(i) != reading) return i;
+    return 0;
+}
+
+inline void publishHqFrame(Shared* s, uint32_t index) {
+    MemoryBarrier();
+    InterlockedExchange(&s->hqLatestFrame, LONG(index));
+    InterlockedIncrement(&s->hqFrameSerial);
 }
 
 // The pad is copied a 32-bit word at a time through volatile pointers: volatile accesses keep

@@ -17,6 +17,8 @@ void setVisible(bool visible);         // tablet: upload only while the ARCADE p
 // Poster: upload only while docked. Turning it off takes effect before this returns, so
 // the caller can let the engine release the texture right after.
 void setPosterActive(bool active);
+void setPosterHqActive(bool active);   // the 2x poster texture (poster quality HIGH)
+bool posterHqTextureReady();
 // A docked display whose art is stored turned (the social lobby's central one): the frame goes
 // into its own texture, turned to stand upright on it.
 void setTurnedActive(bool active, PosterTurn turn);

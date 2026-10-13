@@ -20,6 +20,7 @@ sys.path.insert(0, str(HERE))
 
 import echovr_pkg as P  # noqa: E402
 from arcade_layout import POSTER_TEX_W, POSTER_TEX_H, POSTER_X0, POSTER_Y0, TEX_W, TEX_H, POSTER_TURNED_W, POSTER_TURNED_H  # noqa: E402
+from arcade_layout import POSTER_HQ_W, POSTER_HQ_H, POSTER_HQ_X0, POSTER_HQ_Y0  # noqa: E402
 
 OUT = ROOT / 'native/generated/posters.h'
 MID = '48037dc70b0ecab2'
@@ -173,6 +174,8 @@ def build():
              f'constexpr unsigned POSTER_TEX_W = {POSTER_TEX_W}, POSTER_TEX_H = {POSTER_TEX_H};',
              f'constexpr unsigned POSTER_X0 = {POSTER_X0}, POSTER_Y0 = {POSTER_Y0}, POSTER_FRAME_W = {TEX_W}, POSTER_FRAME_H = {TEX_H};',
              f'constexpr unsigned POSTER_TURNED_W = {POSTER_TURNED_W}, POSTER_TURNED_H = {POSTER_TURNED_H};',
+             f'constexpr unsigned POSTER_HQ_W = {POSTER_HQ_W}, POSTER_HQ_H = {POSTER_HQ_H}, POSTER_HQ_X0 = {POSTER_HQ_X0}, POSTER_HQ_Y0 = {POSTER_HQ_Y0};',
+             f'constexpr unsigned POSTER_HQ_FRAME_W = {2 * TEX_W}, POSTER_HQ_FRAME_H = {2 * TEX_H};',
              '', 'struct PosterTri { float p[3][3]; float uv[3][2]; };',
              '// ur, ud, vr, vd: how the picture lies on the mesh (native/shared/poster_turn.h); 1,0,0,1 = the usual way.',
              'struct PosterMesh { const PosterTri* tris; unsigned count; int ur, ud, vr, vd; };',

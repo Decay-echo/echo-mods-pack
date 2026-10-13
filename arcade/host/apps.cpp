@@ -187,8 +187,9 @@ std::vector<AppInfo> listApps(const Config& c) {
     // Shows the YouTube page open in your browser; with yt-dlp (setup_apps.py) also search and saved links.
     // Echo in Echo: a second Echo VR in its desktop mode (-noovr: no headset, a flat window with
     // mouse and keyboard), on the tablet like any other game. For the friends.
-    apps.push_back({AppId::EchoInner, L"ECHO VR", L"Echo in Echo (desktop mode) - FREEZE to play",
-                    exists(echoExe(c)) ? L"" : L"echovr.exe not found next to the plugin", rgb(230, 120, 40)});
+    if (c.echoInEcho)
+        apps.push_back({AppId::EchoInner, L"ECHO VR", L"Echo in Echo (desktop mode) - FREEZE to play",
+                        exists(echoExe(c)) ? L"" : L"echovr.exe not found next to the plugin", rgb(230, 120, 40)});
     apps.push_back({AppId::YouTube, L"YOUTUBE", exists(c.ytdlp) ? L"Browser YouTube + search" : L"Your browser's YouTube",
                     L"", rgb(255, 48, 64)});
     games.insert(games.end(), apps.begin(), apps.end());
@@ -209,6 +210,11 @@ Session::~Session() {
 Rect Session::contentRect() const {
     if (isRetro(id_)) return {RETRO_PANEL, 0, RETRO_PANEL + RETRO_W, RETRO_H};  // movies and Balatro: full screen
     return {0, 0, SCREEN_W, SCREEN_H};
+}
+
+Rect Session::windowRect() const {
+    Rect r = contentRect();
+    return {0, 0, r.w() * windowScale_, r.h() * windowScale_};
 }
 
 void Session::own(DWORD pid) {
@@ -276,7 +282,7 @@ bool Session::launch(AppId id, const std::wstring& target, double startSeconds,
                      L" \"--ytdl-format=bestvideo[height<=?720]+bestaudio/best\"";
         }
         args = files + L" --input-ipc-server=" + MpvControl::pipeName() +
-               L" --force-window=immediate --no-border --geometry=" + std::to_wstring(SCREEN_W) + L"x" + std::to_wstring(SCREEN_H) +
+               L" --force-window=immediate --no-border --geometry=" + std::to_wstring(windowRect().w()) + L"x" + std::to_wstring(windowRect().h()) +
                L"+0+0 --keep-open=no --idle=no --hwdec=auto-safe --osd-level=1 --title=EchoArcadeMovie --volume=80 --start=" + start;
         if (!audio.id.empty()) args += L" --audio-device=wasapi/" + audio.id;
     } else {
@@ -337,7 +343,7 @@ void Session::poll() {
     }
     if (quitAt_ && GetTickCount64() - quitAt_ > 4000) { hostLog("app did not quit in time; terminating"); kill(); return; }
     if (window_ && !IsWindow(window_)) { window_ = nullptr; capture_.stop(); lastWindow_ = GetTickCount64(); }
-    Rect r = contentRect();
+    Rect r = windowRect();
     int x = config_.windowMode == L"offscreen" ? -8000 : 0;
     if (id_ == AppId::Minecraft) {
         // The launcher first, then the game's own window once it is up (another process). Alive

@@ -48,7 +48,7 @@ MID = '48037dc70b0ecab2'
 STOCK_NPKG = 3
 STOCK_SHA256 = 'e2ae781d32a7fdea89b67a638f33dbab997117c157544b76efa20368eb498fd9'
 EXE_TIMESTAMP, EXE_SIZE = 1683152886, 35852288
-TAB_SCHEMA = 4  # bump when build_arcade_tab.py output changes (2: DOCK poster screen; 3: the turned poster screen; 4: the news board as a poster)
+TAB_SCHEMA = 6  # bump when build_arcade_tab.py output changes (2: DOCK poster screen; 3: the turned poster screen; 4: the news board as a poster; 5: 64x36 touch grid; 6: the HQ poster screen)
 RETROARCH = ROOT / 'apps/retroarch/retroarch.exe'
 
 
@@ -298,6 +298,8 @@ audio_device=Rift Audio|Meta Quest|Oculus Virtual Audio
 app_volume=65
 ; your browser's YouTube on the tablet: its sound through the headset too, or "default" (Windows' default device)
 youtube_audio=headset
+; 1 = an ECHO VR tile: a second Echo VR in desktop mode on the tablet (a party trick; off by default)
+echo_in_echo=0
 ; light gun for RetroArch games (Duck Hunt style), from your shots on the docked poster:
 ; touch: aims and fires without taking focus from Echo VR (default)
 ; focus: gives RetroArch focus and clicks the mouse at the spot; focus comes back after a pause

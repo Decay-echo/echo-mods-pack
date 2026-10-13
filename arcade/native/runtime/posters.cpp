@@ -269,13 +269,15 @@ LONG dockedState() { return docks.empty() ? arcade::Undocked : arcade::Docked; }
 
 // Tells the stream which poster textures to feed: the usual one, the turned one, or neither.
 void syncStream() {
-    bool usual = false, turnedAny = false;
+    bool usual = false, hq = false, turnedAny = false;
     PosterTurn turn = POSTER_UPRIGHT;
     for (auto& d : docks) {
         if (turned(turnOf(d.mesh))) { turnedAny = true; turn = turnOf(d.mesh); }
+        else if (d.texture == ARCADE_POSTER_HQ_TEXTURE) hq = true;
         else usual = true;
     }
     stream::setPosterActive(usual);
+    stream::setPosterHqActive(hq);
     stream::setTurnedActive(turnedAny, turn);
 }
 
@@ -357,6 +359,7 @@ void restoreSiblings(void* cs, unsigned slot, unsigned mesh) {
 void undockAll(const char* why) {
     if (docks.empty()) { answer(arcade::Undocked, "%s", why); return; }
     stream::setPosterActive(false);  // no copies into the textures from here on
+    stream::setPosterHqActive(false);
     stream::setTurnedActive(false, POSTER_UPRIGHT);
     releaseFingers();
     for (auto it = docks.rbegin(); it != docks.rend(); ++it) {
@@ -378,7 +381,7 @@ int dockSlot(void* cs, unsigned slot, Xform space) {
     P item = at<P>(cs, 0x100) + size_t(slot) * POSTER_STRIDE;
     Dock d;
     d.cs = cs; d.gs = gs; d.index = slot; d.actor = info.actor; d.handle = at<U>(keys, size_t(slot) * 16); d.mesh = info.mesh;
-    d.texture = turned(turnOf(info.mesh)) ? ARCADE_POSTER_TURNED_TEXTURE : ARCADE_POSTER_TEXTURE;
+    d.texture = turned(turnOf(info.mesh)) ? ARCADE_POSTER_TURNED_TEXTURE : shared->posterHq ? ARCADE_POSTER_HQ_TEXTURE : ARCADE_POSTER_TEXTURE;
     d.level = placement(info);
     d.space = space;
     d.faces.push_back(d.level);
@@ -405,7 +408,8 @@ int dockSlot(void* cs, unsigned slot, Xform space) {
     Vec center = centerOf(info, space);
     logf("posters: docked on %016llx (system %p slot %u, was %016llx/%016llx, slice %u, replaces %016llx) at %.2f %.2f %.2f; %zu poster(s) of this model; %zu dock(s) now; texture %s%s",
          info.actor, cs, slot, d.savedName, d.savedKey, at<unsigned>(item, 4), at<U>(item, 0x10), center.x, center.y, center.z, d.faces.size(), docks.size(),
-         stream::posterTextureReady() ? "ready" : "NOT CREATED YET", d.texture == ARCADE_POSTER_TURNED_TEXTURE ? " (picture turned for this display)" : "");
+         (d.texture == ARCADE_POSTER_HQ_TEXTURE ? stream::posterHqTextureReady() : stream::posterTextureReady()) ? "ready" : "NOT CREATED YET",
+         d.texture == ARCADE_POSTER_TURNED_TEXTURE ? " (picture turned for this display)" : d.texture == ARCADE_POSTER_HQ_TEXTURE ? " (high quality)" : "");
     syncStream();
     return 0;
 }
@@ -623,7 +627,7 @@ void* destroy(void* cs, unsigned flags) {
         size_t before = docks.size();
         docks.erase(std::remove_if(docks.begin(), docks.end(), [cs](const Dock& d) { return d.cs == cs; }), docks.end());
         if (docks.size() != before) {
-            if (docks.empty()) { stream::setPosterActive(false); releaseFingers(); }  // before the level frees anything
+            if (docks.empty()) { stream::setPosterActive(false); stream::setPosterHqActive(false); releaseFingers(); }  // before the level frees anything
             answer(dockedState(), docks.empty() ? "Left the lobby; the arcade comes back on its posters when you return." : "Docked on %zu poster(s).", docks.size());
         }
     }

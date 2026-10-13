@@ -50,17 +50,21 @@ struct Config {
     std::wstring youtubeAudio;        // the browser's sound while the tablet shows its YouTube: "headset" (default) or "default" (Windows' device)
     std::wstring minecraft, curseforge, modrinth, prism;  // Minecraft launchers ([paths]; empty = found by itself)
     bool moviesTile = false;          // MOVIES on the launcher instead of MINECRAFT
+    bool echoInEcho = false;          // the ECHO VR tile (a second Echo VR in desktop mode); off unless asked for
     float minecraftLook = 3.f;        // FREEZE in Minecraft: mouse pixels per tick at full stick
     int balatroPort = 55410, retroCmdPort = 55355, retroPadPort = 55400;
 };
 Config loadConfig();
 
-// ---- 2D drawing into the 1024x574 BGRA screen (GDI for text) ----
+// ---- 2D drawing into a BGRA screen (GDI for text): the 1024x574 tablet screen, or the same
+// picture at 2x for the high-quality poster screen (every coordinate and size is scaled) ----
 class Canvas {
 public:
-    Canvas();
+    explicit Canvas(int width = SCREEN_W, int height = SCREEN_H, float scale = 1.f);
     ~Canvas();
     uint32_t* pixels() { return px_; }
+    int width() const { return w_; }
+    int height() const { return h_; }
     void clear(uint32_t color);
     void fill(Rect r, uint32_t color);
     void blend(Rect r, uint32_t color, int alpha);  // alpha 0..255
@@ -69,6 +73,10 @@ public:
     void blit(const uint8_t* src, int srcW, int srcH, int srcPitch, Rect dst);  // aspect-fit, bilinear
     void opaque();  // force alpha to 255 (GDI clears it; the tablet sprite honours alpha)
 private:
+    Rect sc(Rect r) const;  // tablet coordinates -> this canvas
+    Rect clip(Rect r) const;
+    int w_, h_;
+    float scale_;
     HDC dc_ = nullptr;
     HBITMAP bmp_ = nullptr, old_ = nullptr;
     uint32_t* px_ = nullptr;

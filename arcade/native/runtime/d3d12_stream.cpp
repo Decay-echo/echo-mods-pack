@@ -47,10 +47,11 @@ std::atomic<bool> running{false}, broken{false};
 std::thread worker;
 
 // A texture we copy each new host frame into, at (x, y).
+enum Image { FRAME = 0, TURNED = 1, HQ = 2 };  // which image of a slot feeds it
 struct Target {
     const char* name;
     UINT width, height, x, y;
-    bool turnedImage;  // fed the second image of the slot: the frame turned (poster_turn.h)
+    int image;  // FRAME: the host frame; TURNED: the frame turned (poster_turn.h); HQ: the host's 2x frame
     std::atomic<bool> active{false};
     std::atomic<ID3D12Resource*> fast{nullptr};
     ID3D12Resource* resource = nullptr;  // AddRef'd while we hold it (guarded by m)
@@ -58,20 +59,23 @@ struct Target {
     D3D12_RESOURCE_STATES state = D3D12_RESOURCE_STATE_COMMON;
     UINT64 uploads = 0;
 };
-enum { TABLET, POSTER, POSTER_TURNED, TARGETS };
+enum { TABLET, POSTER, POSTER_TURNED, POSTER_HQ, TARGETS };
 Target targets[TARGETS] = {
-    {"tablet", ARCADE_TEX_W, ARCADE_TEX_H, 0, 0, false},
-    {"poster", POSTER_TEX_W, POSTER_TEX_H, POSTER_X0, POSTER_Y0, false},
-    {"poster (turned)", POSTER_TURNED_W, POSTER_TURNED_H, POSTER_X0, POSTER_Y0, true},
+    {"tablet", ARCADE_TEX_W, ARCADE_TEX_H, 0, 0, FRAME},
+    {"poster", POSTER_TEX_W, POSTER_TEX_H, POSTER_X0, POSTER_Y0, FRAME},
+    {"poster (turned)", POSTER_TURNED_W, POSTER_TURNED_H, POSTER_X0, POSTER_Y0, TURNED},
+    {"poster (HQ)", POSTER_HQ_W, POSTER_HQ_H, POSTER_HQ_X0, POSTER_HQ_Y0, HQ},
 };
 std::atomic<uint32_t> turnPacked{0x01000001u};  // ur, ud, vr, vd as bytes (signed), upright by default
 PosterTurn currentTurn() {
     uint32_t p = turnPacked.load();
     return {int(int8_t(p >> 24)), int(int8_t(p >> 16)), int(int8_t(p >> 8)), int(int8_t(p))};
 }
-constexpr UINT IMAGE_BYTES = arcade::PITCH * arcade::HEIGHT;  // one frame in a slot; the turned one follows it
+constexpr UINT IMAGE_BYTES = arcade::PITCH * arcade::HEIGHT;  // one frame in a slot; the turned one follows it, then the 2x one
+constexpr UINT HQ_OFFSET = IMAGE_BYTES * 2, SLOT_BYTES = HQ_OFFSET + arcade::HQ_FRAME_BYTES;
 static_assert(ARCADE_TEX_W == arcade::WIDTH && ARCADE_TEX_H == arcade::HEIGHT, "tablet texture is the host frame size");
 static_assert(POSTER_FRAME_W == arcade::WIDTH && POSTER_FRAME_H == arcade::HEIGHT, "poster frame is the host frame size");
+static_assert(POSTER_HQ_FRAME_W == arcade::HQ_WIDTH && POSTER_HQ_FRAME_H == arcade::HQ_HEIGHT, "the HQ poster frame is the host's 2x frame");
 
 std::mutex m;  // guards everything below and each Target's non-atomic fields
 ID3D12Device* device = nullptr;
@@ -88,6 +92,7 @@ struct Slot {
     ID3D12GraphicsCommandList* list = nullptr;
     UINT64 fenceValue = 0;
     LONG serial = 0;
+    bool hqValid = false;  // the 2x image of this slot holds a frame
     SlotState state = SlotState::Free;
 };
 Slot slots[2];
@@ -209,7 +214,7 @@ bool createGpu() {  // caller holds m
     if (!device) return false;
     D3D12_HEAP_PROPERTIES heap{D3D12_HEAP_TYPE_UPLOAD};
     D3D12_RESOURCE_DESC buf{};
-    buf.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER; buf.Width = UINT64(IMAGE_BYTES) * 2; buf.Height = 1;
+    buf.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER; buf.Width = UINT64(SLOT_BYTES); buf.Height = 1;
     buf.DepthOrArraySize = 1; buf.MipLevels = 1; buf.SampleDesc.Count = 1; buf.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
     ownCall = true;
     bool ok = SUCCEEDED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence)));
@@ -224,7 +229,7 @@ bool createGpu() {  // caller holds m
     ownCall = false;
     if (!ok) { logf("stream: failed to create upload resources"); releaseGpu(); broken = true; return false; }
     gpuReady = true;
-    logf("stream: upload path ready (%llu bytes x2, row pitch %u)", buf.Width, ROW_PITCH);
+    logf("stream: upload path ready (%llu bytes x2 slots, row pitch %u)", buf.Width, ROW_PITCH);
     return true;
 }
 
@@ -255,6 +260,18 @@ void workerLoop() {
         bool ok = index >= 0 && index < LONG(arcade::FRAME_BUFFERS) && shared->latestFrame == index;
         if (ok) memcpy(slot->mapped, shared->frames[index], arcade::FRAME_BYTES);  // same pitch on both sides
         InterlockedExchange(&shared->readingFrame, LONG(arcade::NO_FRAME));
+        slot->hqValid = false;
+        if (ok && targets[POSTER_HQ].active) {  // the third image: the host's 2x frame, when it publishes one
+            LONG hq = shared->hqLatestFrame;
+            if (hq >= 0 && hq < LONG(arcade::FRAME_BUFFERS)) {
+                InterlockedExchange(&shared->hqReadingFrame, hq);
+                if (shared->hqLatestFrame == hq) {
+                    memcpy(slot->mapped + HQ_OFFSET, shared->hqFrames[hq], arcade::HQ_FRAME_BYTES);
+                    slot->hqValid = true;
+                }
+                InterlockedExchange(&shared->hqReadingFrame, LONG(arcade::NO_FRAME));
+            }
+        }
         if (ok && targets[POSTER_TURNED].active) {  // the second image: the frame turned for that display
             uint8_t* turnedImage = slot->mapped + IMAGE_BYTES;
             for (UINT y = 0; y < arcade::HEIGHT; y++)
@@ -289,7 +306,7 @@ void recordAndSubmit(ID3D12CommandQueue* q) {  // caller holds m
     if (!ready) return;
     Target* live[TARGETS];
     int count = 0;
-    for (auto& t : targets) if (t.active && t.resource) live[count++] = &t;
+    for (auto& t : targets) if (t.active && t.resource && (t.image != HQ || ready->hqValid)) live[count++] = &t;
     if (!count) return;
     if (FAILED(ready->allocator->Reset())) return;
     ownCall = true;
@@ -301,8 +318,9 @@ void recordAndSubmit(ID3D12CommandQueue* q) {  // caller holds m
         D3D12_TEXTURE_COPY_LOCATION dst{t.resource, D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX};
         dst.SubresourceIndex = 0;
         D3D12_TEXTURE_COPY_LOCATION src{ready->upload, D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT};
-        src.PlacedFootprint.Offset = t.turnedImage ? IMAGE_BYTES : 0;
-        src.PlacedFootprint.Footprint = {t.desc.Format, arcade::WIDTH, arcade::HEIGHT, 1, ROW_PITCH};
+        src.PlacedFootprint.Offset = t.image == TURNED ? IMAGE_BYTES : t.image == HQ ? HQ_OFFSET : 0;
+        if (t.image == HQ) src.PlacedFootprint.Footprint = {t.desc.Format, arcade::HQ_WIDTH, arcade::HQ_HEIGHT, 1, arcade::HQ_PITCH};
+        else src.PlacedFootprint.Footprint = {t.desc.Format, arcade::WIDTH, arcade::HEIGHT, 1, ROW_PITCH};
         list->CopyTextureRegion(&dst, t.x, t.y, 0, &src, nullptr);
         transition(list, t.resource, D3D12_RESOURCE_STATE_COPY_DEST, t.state);
     }
@@ -421,6 +439,14 @@ void setPosterActive(bool a) {
 }
 
 bool posterTextureReady() { return targets[POSTER].fast.load() != nullptr; }
+
+void setPosterHqActive(bool a) {
+    std::lock_guard<std::mutex> lock(m);
+    if (targets[POSTER_HQ].active.exchange(a) != a)
+        logf("stream: HQ poster %s (texture %s)", a ? "docked, streaming" : "undocked, stopped", targets[POSTER_HQ].fast.load() ? "ready" : "NOT CREATED YET");
+}
+
+bool posterHqTextureReady() { return targets[POSTER_HQ].fast.load() != nullptr; }
 
 void setTurnedActive(bool a, PosterTurn t) {
     uint32_t packed = (uint32_t(uint8_t(int8_t(t.ur))) << 24) | (uint32_t(uint8_t(int8_t(t.ud))) << 16) | (uint32_t(uint8_t(int8_t(t.vr))) << 8) | uint32_t(uint8_t(int8_t(t.vd)));

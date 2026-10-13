@@ -74,6 +74,7 @@ std::wstring clock(double s) {
 }
 
 enum class Mode { Launcher, Browse, PlexLink, Running, Menu, Keyboard, Screen };
+#define canvas_ (*target_)  // the canvas being drawn: the tablet screen, or its 2x copy for the poster
 
 struct Entry {
     std::wstring label, sub;
@@ -287,7 +288,17 @@ private:
             int dy = t.y - mcY_;
             mcX_ = t.x;
             mcY_ = t.y;
-            if (!mcScrolled_ && std::abs(t.x - mcX0_) + std::abs(t.y - mcY0_) < TAP_SLOP) return;
+            if (!mcScrolled_ && std::abs(t.x - mcX0_) + std::abs(t.y - mcY0_) < TAP_SLOP) {
+                // The same finger covering more cells: the click goes to the middle of all of them.
+                int sx = 0, sy = 0, n = 0;
+                for (auto& [cell, h] : held_)
+                    if (fit_.contains(h.x, h.y)) { sx += h.x; sy += h.y; n++; }
+                if (n && toApp(sx / n, sy / n, u, v)) {
+                    mcAt_ = {LONG(u * client.right), LONG(v * client.bottom)};
+                    ClientToScreen(window, &mcAt_);
+                }
+                return;
+            }
             mcScrolled_ = true;
             if (dy) mcMouse(window, at, dy * 120 / 80);  // the list follows the finger: 80 tablet px a notch
             return;
@@ -1090,6 +1101,8 @@ private:
         std::wstring t = tweaksPath();
         shared_->tabletScale = LONG(std::clamp(iniFloat(t, L"tablet", L"scale", 1.f), .5f, 4.f) * 1000);
         autoDock_ = GetPrivateProfileIntW(L"dock", L"auto", 1, t.c_str()) != 0;  // on unless turned off
+        posterHq_ = _wcsicmp(iniText(t, L"poster", L"quality", L"normal").c_str(), L"high") == 0;
+        session_.setWindowScale(posterHq_ ? 2 : 1);
         std::wstring buttons = iniText(t, L"freeze", L"buttons", L"");          // the tablet's choice beats arcade.ini
         if (!buttons.empty()) config_.freezeButtons = buttons;
         std::wstring yt = iniText(t, L"youtube", L"audio", L"");
@@ -1129,6 +1142,17 @@ private:
         dock.get = [this] { return autoDock_ ? 1.f : 0.f; };
         dock.set = [this](float v) { if ((v != 0) != autoDock_) dockTapped(); };
         tablet.options.push_back(dock);
+        Option quality{L"Poster quality", L"HIGH: the arcade at twice the detail on the posters (more CPU every frame; for a strong PC)", Kind::Choice};
+        quality.choices = {L"NORMAL", L"HIGH"};
+        quality.get = [this] { return posterHq_ ? 1.f : 0.f; };
+        quality.set = [this, tweaks](float v) {
+            posterHq_ = v != 0;
+            iniWrite(tweaks, L"poster", L"quality", posterHq_ ? L"high" : L"normal");
+            session_.setWindowScale(posterHq_ ? 2 : 1);
+            message_ = posterHq_ ? L"Poster quality HIGH: from the next dock (undock and dock again); apps started from now on render bigger."
+                                 : L"Poster quality NORMAL: from the next dock.";
+        };
+        tablet.options.push_back(quality);
         Option buttons{L"FREEZE buttons", L"Touch A B X Y on the game pad: by place (like an Xbox pad) or by name", Kind::Choice};
         buttons.choices = {L"BY PLACE", L"BY NAME"};
         buttons.get = [this] { return config_.freezeButtons == L"labels" ? 1.f : 0.f; };
@@ -1918,12 +1942,32 @@ private:
             std::wstring name = isVideo(session_.id()) ? playing_ : current_.title;
             canvas_.text(content, L"Starting " + name + std::wstring(dots, L'.'), 32, rgb(220, 220, 230));
         }
+        if (isDesktop(session_.id()) && session_.hasWindow() && capW_ > 0) drawCursor();
         if (isVideo(session_.id())) drawPlayerControls();
         else if (isRetro(session_.id())) drawPad();
         else {
             canvas_.blend(BALATRO_HOME, rgb(0, 0, 0), 150);
             canvas_.text(BALATRO_HOME, L"\x2261", 40, rgb(255, 255, 255));
         }
+    }
+
+    // The mouse pointer over a desktop app's picture (the capture leaves it out): where the right
+    // stick points during FREEZE, and where the last tap landed. Only while the app has the mouse.
+    void drawCursor() {
+        HWND window = session_.window();
+        if (!window || (GetForegroundWindow() != window && !freeze_)) return;
+        POINT p;
+        RECT client{};
+        POINT origin{0, 0};
+        if (!GetCursorPos(&p) || !GetClientRect(window, &client) || !ClientToScreen(window, &origin)) return;
+        if (client.right <= 0 || client.bottom <= 0) return;
+        float u = float(p.x - origin.x) / client.right, v = float(p.y - origin.y) / client.bottom;
+        if (u < 0 || v < 0 || u > 1 || v > 1) return;
+        int x = fit_.x0 + int(u * fit_.w()), y = fit_.y0 + int(v * fit_.h());
+        canvas_.fill({x - 9, y - 1, x + 10, y + 2}, rgb(0, 0, 0));
+        canvas_.fill({x - 1, y - 9, x + 2, y + 10}, rgb(0, 0, 0));
+        canvas_.fill({x - 8, y, x + 9, y + 1}, rgb(255, 255, 255));
+        canvas_.fill({x, y - 8, x + 1, y + 9}, rgb(255, 255, 255));
     }
 
     void drawPlayerControls() {
@@ -1998,7 +2042,13 @@ private:
         if (!message_.empty()) canvas_.text({0, 486, SCREEN_W, 540}, message_, 22, rgb(255, 220, 200));
     }
 
+    bool hqWanted() const { return posterHq_ && shared_->dockState == arcade::Docked; }  // only while docked (the tablet never needs it)
     void render() {
+        target_ = &screen_;
+        draw();
+        if (hqWanted()) { target_ = &hq_; draw(); target_ = &screen_; }
+    }
+    void draw() {
         bool settings = settingsMode();
         if (settings != lastSettings_) {
             if (session_.alive()) releaseGameInput(); else resetInput();
@@ -2021,8 +2071,16 @@ private:
 
     void publish() {
         uint32_t index = arcade::writableFrame(shared_);
-        memcpy(shared_->frames[index], canvas_.pixels(), arcade::FRAME_BYTES);
+        memcpy(shared_->frames[index], screen_.pixels(), arcade::FRAME_BYTES);
         arcade::publishFrame(shared_, index);
+        if (hqWanted()) {
+            uint32_t hq = arcade::writableHqFrame(shared_);
+            memcpy(shared_->hqFrames[hq], hq_.pixels(), arcade::HQ_FRAME_BYTES);
+            arcade::publishHqFrame(shared_, hq);
+        } else if (shared_->hqLatestFrame != LONG(arcade::NO_FRAME)) {
+            InterlockedExchange(&shared_->hqLatestFrame, LONG(arcade::NO_FRAME));
+        }
+        shared_->posterHq = posterHq_ ? 1 : 0;
     }
 
     arcade::Shared* shared_;
@@ -2030,7 +2088,10 @@ private:
     Config config_;
     Session session_;
     LightGun lightGun_;
-    Canvas canvas_;
+    Canvas screen_;                     // the 1024x574 tablet screen
+    Canvas hq_{int(arcade::HQ_WIDTH), int(arcade::HQ_HEIGHT), 2.f};  // the same at 2x (poster quality HIGH, while docked)
+    Canvas* target_ = &screen_;
+    bool posterHq_ = false;             // SETTINGS > TABLET > Poster quality
     Plex plex_;
     std::vector<AppInfo> apps_;
     AppInfo current_{};

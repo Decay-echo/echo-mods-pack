@@ -25,9 +25,11 @@ Offsets match native/shared/arcade_ipc.h (checked by tests/ipc_test.cpp).
 """
 import mmap, struct, sys, time, zlib, ctypes
 
-W, H, COLS, ROWS = 1024, 574, 32, 18
+W, H, COLS, ROWS = 1024, 574, 64, 36
 FRAME = W * H * 4
-SIZE = 8192 + 3 * FRAME
+HQ_FRAME = 2 * W * 4 * 2 * H
+HQ_AT = (8192 + 3 * FRAME + 16 + 4095) // 4096 * 4096   # the 2x ring, page aligned after its four words
+SIZE = HQ_AT + 3 * HQ_FRAME
 kernel = ctypes.windll.kernel32
 kernel.GetTickCount64.restype = ctypes.c_uint64
 

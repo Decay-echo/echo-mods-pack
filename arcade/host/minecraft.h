@@ -241,7 +241,7 @@ public:
         key('Q', (s.buttons & arcade::BUTTON_X) != 0);
         key('E', (s.buttons & arcade::BUTTON_Y) != 0);
         key(VK_LCONTROL, (s.buttons & arcade::BUTTON_LTHUMB) != 0);
-        key(VK_F5, (s.buttons & arcade::BUTTON_RTHUMB) != 0);
+        key(VK_LSHIFT, (s.buttons & arcade::BUTTON_RTHUMB) != 0);  // sneak, like B (it was F5: third person)
         key(VK_ESCAPE, f.pad[PadStart]);
         mouse(0, s.trigger[1] > 0.5f);
         mouse(1, s.trigger[0] > 0.5f);

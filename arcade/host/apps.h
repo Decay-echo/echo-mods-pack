@@ -50,6 +50,8 @@ public:
     HWND window() const { return window_; }
     AppId id() const { return id_; }
     Rect contentRect() const;    // where the app goes on the tablet screen
+    Rect windowRect() const;     // the window's size: that, times the window scale (2 for poster quality HIGH)
+    void setWindowScale(int s) { windowScale_ = s < 1 ? 1 : s; }
     WindowCapture& capture() { return capture_; }
     void quit();                 // polite request, then forced after a grace period
     void kill();
@@ -88,6 +90,7 @@ private:
     // Every process this session put on the tablet (the one it started, a launcher's, the
     // game's): all ended on kill(), and by the watchdog if the host dies first (Echo closing).
     std::vector<DWORD> owned_;
+    int windowScale_ = 1;
     bool gameSuspended_ = false;     // Minecraft's game process is suspended right now
     DWORD suspendedPid_ = 0;
     int lastPriority_ = -1;          // 1 normal (played), 0 below normal

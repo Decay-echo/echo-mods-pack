@@ -5,7 +5,7 @@ PAGE_X, PAGE_Y = 28, 112          # page child position inside the root canvas
 PAGE_W, PAGE_H = 942, 528         # same page area the stock pages use
 SCREEN_RECT = (0, 0, PAGE_W, PAGE_H)
 TEX_W, TEX_H = 1024, 574          # page aspect; this size is unique among stock textures
-GRID_COLS, GRID_ROWS = 32, 18     # invisible poke cells over the screen (~8.6 mm each)
+GRID_COLS, GRID_ROWS = 64, 36     # invisible poke cells over the screen (~4.3 mm each; a fingertip covers a few)
 # Navigation bar: ARCADE, the 4 stock tabs, SETTINGS as 6 evenly spaced icons centred
 # on the bar (between its corner marks at x~61 and x~929). Stock spacing is 204.8,
 # which only fits 4.
@@ -23,6 +23,9 @@ POSTER_X0, POSTER_Y0 = 45, 20              # where the 1024 x 574 frame goes in 
 # posters whose art is stored turned (the social lobby's central display): the frame goes in
 # turned to match, so the picture stands upright on them.
 POSTER_TURNED_W, POSTER_TURNED_H = 1248, 612
+# The high-quality poster screen: the same layout at 2x (a 2048 x 1148 frame), its own texture.
+POSTER_HQ_W, POSTER_HQ_H = 2 * POSTER_TEX_W, 2 * POSTER_TEX_H
+POSTER_HQ_X0, POSTER_HQ_Y0 = 2 * POSTER_X0, 2 * POSTER_Y0
 
 
 def tab_rect(slot):

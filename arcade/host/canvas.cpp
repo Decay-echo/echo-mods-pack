@@ -95,6 +95,7 @@ Config loadConfig() {
     c.modrinth = get(L"modrinth");
     c.prism = get(L"prism");
     c.moviesTile = GetPrivateProfileIntW(L"host", L"movies_tile", 0, ini.c_str()) != 0;
+    c.echoInEcho = GetPrivateProfileIntW(L"host", L"echo_in_echo", 0, ini.c_str()) != 0;
     wchar_t look[32];
     GetPrivateProfileStringW(L"minecraft", L"look_speed", L"3", look, 32, ini.c_str());
     c.minecraftLook = float(std::clamp(_wtof(look), 0.5, 20.0));
@@ -109,11 +110,11 @@ Touch touchFromCell(int cell, bool down, int cols, int rows) {
     return {cell, down, int((c + .5f) * SCREEN_W / cols), int((r + .5f) * SCREEN_H / rows)};
 }
 
-Canvas::Canvas() {
+Canvas::Canvas(int width, int height, float scale) : w_(width), h_(height), scale_(scale) {
     BITMAPINFO bi{};
     bi.bmiHeader.biSize = sizeof(bi.bmiHeader);
-    bi.bmiHeader.biWidth = SCREEN_W;
-    bi.bmiHeader.biHeight = -SCREEN_H;  // top-down, matches the texture
+    bi.bmiHeader.biWidth = w_;
+    bi.bmiHeader.biHeight = -h_;  // top-down, matches the texture
     bi.bmiHeader.biPlanes = 1;
     bi.bmiHeader.biBitCount = 32;
     dc_ = CreateCompatibleDC(nullptr);
@@ -128,23 +129,28 @@ Canvas::~Canvas() {
     DeleteDC(dc_);
 }
 
-static Rect clip(Rect r) {
-    return {std::max(r.x0, 0), std::max(r.y0, 0), std::min(r.x1, SCREEN_W), std::min(r.y1, SCREEN_H)};
+Rect Canvas::sc(Rect r) const {
+    if (scale_ == 1.f) return r;
+    return {int(r.x0 * scale_ + .5f), int(r.y0 * scale_ + .5f), int(r.x1 * scale_ + .5f), int(r.y1 * scale_ + .5f)};
 }
 
-void Canvas::clear(uint32_t color) { std::fill(px_, px_ + SCREEN_W * SCREEN_H, color); }
+Rect Canvas::clip(Rect r) const {
+    return {std::max(r.x0, 0), std::max(r.y0, 0), std::min(r.x1, w_), std::min(r.y1, h_)};
+}
+
+void Canvas::clear(uint32_t color) { std::fill(px_, px_ + size_t(w_) * h_, color); }
 
 void Canvas::fill(Rect r, uint32_t color) {
-    r = clip(r);
-    for (int y = r.y0; y < r.y1; y++) std::fill(px_ + y * SCREEN_W + r.x0, px_ + y * SCREEN_W + r.x1, color);
+    r = clip(sc(r));
+    for (int y = r.y0; y < r.y1; y++) std::fill(px_ + size_t(y) * w_ + r.x0, px_ + size_t(y) * w_ + r.x1, color);
 }
 
 void Canvas::blend(Rect r, uint32_t color, int a) {
-    r = clip(r);
+    r = clip(sc(r));
     uint32_t cr = (color >> 16) & 255, cg = (color >> 8) & 255, cb = color & 255;
     for (int y = r.y0; y < r.y1; y++)
         for (int x = r.x0; x < r.x1; x++) {
-            uint32_t& p = px_[y * SCREEN_W + x];
+            uint32_t& p = px_[size_t(y) * w_ + x];
             uint32_t pr = (p >> 16) & 255, pg = (p >> 8) & 255, pb = p & 255;
             p = rgb((pr * (255 - a) + cr * a) / 255, (pg * (255 - a) + cg * a) / 255, (pb * (255 - a) + cb * a) / 255);
         }
@@ -158,6 +164,8 @@ void Canvas::frame(Rect r, uint32_t color, int t) {
 }
 
 void Canvas::text(Rect r, const std::wstring& s, int size, uint32_t color, bool bold, int align) {
+    r = sc(r);
+    size = std::max(1, int(size * scale_ + .5f));
     GdiFlush();
     HFONT font = CreateFontW(-size, 0, 0, 0, bold ? FW_BOLD : FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
                              CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY, DEFAULT_PITCH, L"Segoe UI");
@@ -174,6 +182,7 @@ void Canvas::text(Rect r, const std::wstring& s, int size, uint32_t color, bool 
 
 void Canvas::blit(const uint8_t* src, int sw, int sh, int pitch, Rect dst) {
     if (!src || sw <= 0 || sh <= 0) return;
+    dst = sc(dst);
     // Aspect-fit into dst, letterboxing with black.
     float scale = std::min(float(dst.w()) / sw, float(dst.h()) / sh);
     int w = std::max(1, int(sw * scale)), h = std::max(1, int(sh * scale));
@@ -183,25 +192,26 @@ void Canvas::blit(const uint8_t* src, int sw, int sh, int pitch, Rect dst) {
     fill({dst.x0, in.y1, dst.x1, dst.y1}, rgb(0, 0, 0));
     fill({dst.x0, in.y0, in.x0, in.y1}, rgb(0, 0, 0));
     fill({in.x1, in.y0, dst.x1, in.y1}, rgb(0, 0, 0));
-    if (w == sw && h == sh) {
+    if (w == sw && h == sh && in.x0 >= 0 && in.x1 <= w_) {
         for (int y = 0; y < h; y++) {
             int ty = in.y0 + y;
-            if (ty < 0 || ty >= SCREEN_H) continue;
-            memcpy(px_ + ty * SCREEN_W + in.x0, src + size_t(y) * pitch, size_t(w) * 4);
+            if (ty < 0 || ty >= h_) continue;
+            memcpy(px_ + size_t(ty) * w_ + in.x0, src + size_t(y) * pitch, size_t(w) * 4);
         }
         return;
     }
     float fx = float(sw) / w, fy = float(sh) / h;
     for (int y = 0; y < h; y++) {
         int ty = in.y0 + y;
-        if (ty < 0 || ty >= SCREEN_H) continue;
+        if (ty < 0 || ty >= h_) continue;
         float syf = std::max(0.f, (y + .5f) * fy - .5f);
         int sy0 = std::min(int(syf), sh - 1), sy1 = std::min(sy0 + 1, sh - 1);
         uint32_t wy = uint32_t((syf - sy0) * 256);
         auto r0 = reinterpret_cast<const uint32_t*>(src + size_t(sy0) * pitch);
         auto r1 = reinterpret_cast<const uint32_t*>(src + size_t(sy1) * pitch);
-        uint32_t* out = px_ + ty * SCREEN_W + in.x0;
+        uint32_t* out = px_ + size_t(ty) * w_ + in.x0;
         for (int x = 0; x < w; x++) {
+            if (in.x0 + x < 0 || in.x0 + x >= w_) continue;
             float sxf = std::max(0.f, (x + .5f) * fx - .5f);
             int sx0 = std::min(int(sxf), sw - 1), sx1 = std::min(sx0 + 1, sw - 1);
             uint32_t wx = uint32_t((sxf - sx0) * 256);
@@ -219,5 +229,5 @@ void Canvas::blit(const uint8_t* src, int sw, int sh, int pitch, Rect dst) {
 
 void Canvas::opaque() {
     GdiFlush();
-    for (int i = 0; i < SCREEN_W * SCREEN_H; i++) px_[i] |= 0xff000000u;
+    for (size_t i = 0; i < size_t(w_) * h_; i++) px_[i] |= 0xff000000u;
 }
