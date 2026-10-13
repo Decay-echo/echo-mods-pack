@@ -184,6 +184,7 @@ def build():
         lines.append('};')
     lines.append('constexpr PosterMesh POSTER_MESHES[] = {' +
                  ', '.join(f'{{POSTER_MESH_{i}, {len(t)}, {turn[0]}, {turn[1]}, {turn[2]}, {turn[3]}}}' for i, (_, t, turn) in enumerate(meshes)) + '};')
+    lines.append('constexpr uint64_t POSTER_MODELS[] = {' + ', '.join(f'0x{r:016x}' for r, _, _ in meshes) + '};')
     lines.append('constexpr PosterInfo POSTERS[] = {')
     for actor, (m, p, q, s) in sorted(posters.items()):
         lines.append(f'    {{0x{actor:016x}, {m}, {{{",".join(f(v) for v in p)}}}, {{{",".join(f(v) for v in q)}}}, {{{",".join(f(v) for v in s)}}}}},')

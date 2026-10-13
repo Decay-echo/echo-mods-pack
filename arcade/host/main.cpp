@@ -135,6 +135,7 @@ public:
             Sleep(4);
         }
         shared_->controllerWant = 0;  // Echo gets the controllers back
+        if (screenWin_) closeScreen("the arcade is closing");  // the browser's sound and window state back as they were
         if (session_.alive()) {
             finishPlex();
             session_.quit();
@@ -481,9 +482,38 @@ private:
         mode_ = Mode::Screen;
         resetInput();
         hostLog("youtube: showing window %p \"%ls\"", window, screenTitle_.c_str());
+        routeScreenAudio();
     }
-    void closeScreen() {
+    // The browser's sound while the tablet shows its YouTube: to the headset, like the arcade's
+    // own apps, or left on Windows' default device (the YouTube sound setting). Windows keeps the
+    // choice per app, so it is forgotten again when the tablet lets go of the window.
+    void routeScreenAudio() {
+        if (!screenWin_) return;
+        DWORD pid = 0;
+        GetWindowThreadProcessId(screenWin_, &pid);
+        if (!pid) return;
+        if (config_.youtubeAudio != L"default") {
+            AudioTarget audio = findAudioDevice(config_.audioDevice);
+            if (audio.id.empty()) {
+                hostLog("youtube: no headset device matching \"%ls\"; the browser keeps Windows' default", config_.audioDevice.c_str());
+                return;
+            }
+            bool ok = routeProcessAudio(pid, audio);
+            if (ok) screenRoutedPid_ = pid;
+            hostLog("youtube: browser (pid %lu) sound -> %ls (%s)", pid, audio.name.c_str(), ok ? "ok" : "could not route");
+        } else {
+            unrouteScreenAudio();
+        }
+    }
+    void unrouteScreenAudio() {
+        if (!screenRoutedPid_) return;
+        hostLog("youtube: browser (pid %lu) sound back to Windows' default (%s)", screenRoutedPid_, clearProcessAudio(screenRoutedPid_) ? "ok" : "could not");
+        screenRoutedPid_ = 0;
+    }
+    void closeScreen(const char* why) {
+        hostLog("youtube: screen off (%s)", why);
         screenCap_.stop();
+        unrouteScreenAudio();
         if (screenWin_ && !screenWasTopmost_ && IsWindow(screenWin_))
             SetWindowPos(screenWin_, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
         screenWin_ = nullptr;
@@ -494,7 +524,12 @@ private:
     }
     void pollScreen(uint64_t now) {
         if (!screenWin_) return;  // also while its search keyboard is up
-        if (!IsWindow(screenWin_)) { message_ = L"The YouTube window closed."; closeScreen(); return; }
+        if (!IsWindow(screenWin_)) { message_ = L"The YouTube window closed."; closeScreen("the window is gone"); return; }
+        if (IsIconic(screenWin_) && now - lastUnminimize_ > 3000) {  // minimized: nothing to capture
+            lastUnminimize_ = now;
+            ShowWindowAsync(screenWin_, SW_SHOWNOACTIVATE);
+            hostLog("youtube: the window was minimized; showing it again (without the focus)");
+        }
         if (now - lastTitlePoll_ > 500) {
             lastTitlePoll_ = now;
             screenTitle_ = youTubeWindowTitle(screenWin_);
@@ -545,7 +580,13 @@ private:
         if (tapAt_ && now >= tapAt_) {
             tapAt_ = 0;
             POINT at;
-            if (mode_ == Mode::Screen && tabletToScreen(fingerX0_, fingerY0_, at)) pageTap(window, at);
+            if (mode_ == Mode::Screen && tabletToScreen(fingerX0_, fingerY0_, at)) {
+                hostLog("youtube: tap %d,%d -> screen %ld,%ld (window frame %ld,%ld-%ld,%ld, page %ld,%ld-%ld,%ld, capture %dx%d crop %d,%d %dx%d, shown %d,%d-%d,%d)",
+                        fingerX0_, fingerY0_, at.x, at.y, frame_.left, frame_.top, frame_.right, frame_.bottom,
+                        docRect_.left, docRect_.top, docRect_.right, docRect_.bottom, scrW_, scrH_, cropX_, cropY_, cropW_, cropH_,
+                        pageShown_.x0, pageShown_.y0, pageShown_.x1, pageShown_.y1);
+                pageTap(window, at);
+            }
         }
     }
     void screenCommand(MediaCommand command, double to = 0) {
@@ -587,7 +628,7 @@ private:
             case 3: screenCommand(MediaCommand::Previous); break;
             case 4: screenCommand(MediaCommand::PlayPause); break;
             case 5: screenCommand(MediaCommand::Next); break;
-            case 6: closeScreen(); break;
+            case 6: closeScreen("CLOSE tapped"); break;
         }
     }
     bool toolbarShown() const { return toolbar_; }
@@ -989,6 +1030,8 @@ private:
         autoDock_ = GetPrivateProfileIntW(L"dock", L"auto", 1, t.c_str()) != 0;  // on unless turned off
         std::wstring buttons = iniText(t, L"freeze", L"buttons", L"");          // the tablet's choice beats arcade.ini
         if (!buttons.empty()) config_.freezeButtons = buttons;
+        std::wstring yt = iniText(t, L"youtube", L"audio", L"");
+        if (!yt.empty()) config_.youtubeAudio = yt;
         if (removalScheduled()) startRemover(true);  // its helper went away (PC restarted?): again
     }
 
@@ -1013,6 +1056,15 @@ private:
             iniWrite(tweaks, L"freeze", L"buttons", config_.freezeButtons);
         };
         tablet.options.push_back(buttons);
+        Option ytAudio{L"YouTube sound", L"Your browser's YouTube on the tablet: through the headset, or Windows' default device", Kind::Choice};
+        ytAudio.choices = {L"HEADSET", L"DEFAULT"};
+        ytAudio.get = [this] { return config_.youtubeAudio == L"default" ? 1.f : 0.f; };
+        ytAudio.set = [this, tweaks](float v) {
+            config_.youtubeAudio = v != 0 ? L"default" : L"headset";
+            iniWrite(tweaks, L"youtube", L"audio", config_.youtubeAudio);
+            routeScreenAudio();
+        };
+        tablet.options.push_back(ytAudio);
         tablet.footer = L"View (FOV) is set in echo_tweaks.ini.";
         pages_.push_back(tablet);
 
@@ -1846,6 +1898,8 @@ private:
     std::wstring message_, loading_, playing_, linkCode_, query_, screenTitle_;
     WindowCapture screenCap_;
     HWND screenWin_ = nullptr;
+    DWORD screenRoutedPid_ = 0;        // the browser whose sound went to the headset
+    uint64_t lastUnminimize_ = 0;
     MediaInfo media_;
     bool mediaBusy_ = false, adBusy_ = false;
     uint64_t lastAdCheck_ = 0, adToastAt_ = 0;

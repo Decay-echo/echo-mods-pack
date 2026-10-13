@@ -296,6 +296,8 @@ window_mode=desktop
 audio_device=Rift Audio|Meta Quest|Oculus Virtual Audio
 ; each app's own volume on that device (Windows' per-app volume), percent
 app_volume=65
+; your browser's YouTube on the tablet: its sound through the headset too, or "default" (Windows' default device)
+youtube_audio=headset
 ; light gun for RetroArch games (Duck Hunt style), from your shots on the docked poster:
 ; touch: aims and fires without taking focus from Echo VR (default)
 ; focus: gives RetroArch focus and clicks the mouse at the spot; focus comes back after a pause

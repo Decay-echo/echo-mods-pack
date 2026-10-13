@@ -23,6 +23,7 @@ void hostLog(const char* format, ...);
 struct AudioTarget { std::wstring id, name; };
 AudioTarget findAudioDevice(const std::wstring& patterns);
 bool routeProcessAudio(DWORD pid, const AudioTarget& target);  // that process's default output
+bool clearProcessAudio(DWORD pid);                              // that choice forgotten: Windows' default device again
 bool setProcessVolume(DWORD pid, const AudioTarget& target, float level);  // its own volume there, 0..1 (once it plays)
 extern thread_local long lastAudioError;                        // HRESULT of the last failed route
 std::wstring localAppData();  // %LOCALAPPDATA%, even when the variable is missing
@@ -46,6 +47,7 @@ struct Config {
     float appVolume = 0.65f;          // each app's own volume on that device (Windows' per-app volume), 0..1
     std::wstring lightGun;            // RetroArch light gun from poster shots: "touch" (default), "focus" or "off"
     std::wstring freezeButtons;       // FREEZE: Touch A/B/X/Y on the RetroPad by "position" (default, like an Xbox pad) or "labels"
+    std::wstring youtubeAudio;        // the browser's sound while the tablet shows its YouTube: "headset" (default) or "default" (Windows' device)
     std::wstring minecraft, curseforge, modrinth, prism;  // Minecraft launchers ([paths]; empty = found by itself)
     bool moviesTile = false;          // MOVIES on the launcher instead of MINECRAFT
     float minecraftLook = 3.f;        // FREEZE in Minecraft: mouse pixels per tick at full stick

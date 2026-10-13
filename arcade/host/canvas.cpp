@@ -87,6 +87,9 @@ Config loadConfig() {
     wchar_t buttons[32];
     GetPrivateProfileStringW(L"host", L"freeze_buttons", L"position", buttons, 32, ini.c_str());
     c.freezeButtons = buttons;
+    wchar_t yt[32];
+    GetPrivateProfileStringW(L"host", L"youtube_audio", L"headset", yt, 32, ini.c_str());
+    c.youtubeAudio = yt;
     c.minecraft = get(L"minecraft");
     c.curseforge = get(L"curseforge");
     c.modrinth = get(L"modrinth");

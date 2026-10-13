@@ -215,6 +215,20 @@ int posterOf(void* gs, U handle) {
 
 bool hasFace(unsigned mesh) { return mesh != POSTER_NO_MESH; }
 
+// Models AUTO DOCK leaves alone: the six banners hanging around the social lobby's middle column
+// (POSTER_MODELS is the generated table's model per mesh). They are the first posters near a
+// player who has just spawned, and nobody plays on a banner 4 m up.
+constexpr uint64_t BANNER_MODELS[] = {0x1a45a951ebda2ea9};
+bool banner(unsigned mesh) {
+    if (mesh == POSTER_NO_MESH) return false;
+    for (uint64_t m : BANNER_MODELS)
+        if (POSTER_MODELS[mesh] == m) return true;
+    return false;
+}
+// AUTO DOCK reaches this far: a poster farther from the player is left alone (the arcade used
+// to land on posters all over the lobby, one every 2 s).
+constexpr float DOCK_REACH = 10.f;
+
 Xform placement(const PosterInfo& info) {
     return Xform{{info.rot[0], info.rot[1], info.rot[2], info.rot[3]}, {info.pos[0], info.pos[1], info.pos[2]}, info.scale[0]};
 }
@@ -286,14 +300,39 @@ bool slotStill(const Dock& d) {
     return d.index < at<unsigned short>(d.cs, 0xfc) && at<U>(at<P>(d.cs, 0x108), size_t(d.index) * 16) == d.handle;
 }
 
+// The other posters of the same model in that system get their own art re-applied, each with
+// its own slice: the engine swaps the texture on the model they share, so the arcade was on all
+// of them, and restoring the docked slot alone left them all showing that slot's picture.
+void restoreSiblings(void* cs, unsigned slot, unsigned mesh) {
+    void* gs = at<void*>(cs, 0x80);
+    P keys = at<P>(cs, 0x108);
+    unsigned count = at<unsigned short>(cs, 0xfc), restored = 0;
+    for (unsigned i = 0; i < count && keys; i++) {
+        if (i == slot) continue;
+        int which = posterOf(gs, at<U>(keys, size_t(i) * 16));
+        if (which < 0 || POSTERS[which].mesh != mesh) continue;
+        bool docked = false;
+        for (auto& d : docks)
+            if (d.cs == cs && d.index == i) docked = true;
+        if (docked) continue;
+        P item = at<P>(cs, 0x100) + size_t(i) * POSTER_STRIDE;
+        restoreArt(cs, i, at<U>(item, 0x08), at<U>(item, 0x48));
+        restored++;
+    }
+    if (restored) logf("posters: %u other poster(s) of that model got their own art back", restored);
+}
+
 // Every poster back to its own picture, and the session's list forgotten (DOCK turned off).
 void undockAll(const char* why) {
     if (docks.empty()) { answer(arcade::Undocked, "%s", why); return; }
     stream::setPosterActive(false);  // no copies into the textures from here on
     stream::setTurnedActive(false, POSTER_UPRIGHT);
     releaseFingers();
-    for (auto it = docks.rbegin(); it != docks.rend(); ++it)
-        if (slotStill(*it)) restoreArt(it->cs, it->index, it->savedName, it->savedKey);
+    for (auto it = docks.rbegin(); it != docks.rend(); ++it) {
+        if (!slotStill(*it)) continue;
+        restoreArt(it->cs, it->index, it->savedName, it->savedKey);
+        restoreSiblings(it->cs, it->index, it->mesh);
+    }
     docks.clear();
     remembered.clear();
     answer(arcade::Undocked, "%s", why);
@@ -333,8 +372,8 @@ int dockSlot(void* cs, unsigned slot, Xform space) {
     docks.push_back(d);
     remembered.insert(info.actor);
     Vec center = centerOf(info, space);
-    logf("posters: docked on %016llx (system %p slot %u, was %016llx/%016llx) at %.2f %.2f %.2f; %zu poster(s) of this model; %zu dock(s) now; texture %s%s",
-         info.actor, cs, slot, d.savedName, d.savedKey, center.x, center.y, center.z, d.faces.size(), docks.size(),
+    logf("posters: docked on %016llx (system %p slot %u, was %016llx/%016llx, slice %u, replaces %016llx) at %.2f %.2f %.2f; %zu poster(s) of this model; %zu dock(s) now; texture %s%s",
+         info.actor, cs, slot, d.savedName, d.savedKey, at<unsigned>(item, 4), at<U>(item, 0x10), center.x, center.y, center.z, d.faces.size(), docks.size(),
          stream::posterTextureReady() ? "ready" : "NOT CREATED YET", d.texture == ARCADE_POSTER_TURNED_TEXTURE ? " (picture turned for this display)" : "");
     syncStream();
     return 0;
@@ -352,7 +391,9 @@ void handleRequest(U now) {
     }
     void* bestCs = nullptr;
     unsigned best = 0;
-    float bestDistance = 1e9f;
+    float bestDistance = 1e9f, anyDistance = 1e9f;  // nearest dockable poster; nearest of any kind (for the log)
+    U anyActor = 0;
+    const char* anyWhy = "";
     Vec player;
     Xform bestSpace;
     bool sawHands = false;
@@ -365,10 +406,14 @@ void handleRequest(U now) {
         P keys = at<P>(cs, 0x108);
         for (unsigned i = 0; i < count && keys; i++) {
             int which = posterOf(gs, at<U>(keys, size_t(i) * 16));
+            if (which < 0) continue;
+            const PosterInfo& p = POSTERS[which];
+            float d = length(centerOf(p, space) - player);
             // Posters without a face map are never docked: on the combat-lobby set piece the
-            // arcade texture drew blank and a shot at it crashed the GPU.
-            if (which < 0 || !hasFace(POSTERS[which].mesh)) continue;
-            float d = length(centerOf(POSTERS[which], space) - player);
+            // arcade texture drew blank and a shot at it crashed the GPU. Banners are left alone.
+            const char* why = !hasFace(p.mesh) ? "no face map" : banner(p.mesh) ? "a banner" : refused.count(p.actor) ? "refused the arcade earlier" : nullptr;
+            if (d < anyDistance) { anyDistance = d; anyActor = p.actor; anyWhy = why ? why : covered(cs, p.mesh) ? "showing the arcade already" : "can dock"; }
+            if (why) continue;
             if (d < bestDistance) { bestDistance = d; bestCs = cs; best = i; bestSpace = space; }
         }
     }
@@ -376,7 +421,18 @@ void handleRequest(U now) {
         answer(dockedState(), docks.empty() ? "Could not find your hands - touch the tablet." : "Docked on %zu poster(s).", docks.size());
         return;
     }
-    if (!bestCs) { answer(dockedState(), docks.empty() ? "No poster here can show the arcade." : "Docked on %zu poster(s).", docks.size()); return; }
+    if (!bestCs || bestDistance > DOCK_REACH) {
+        static U lastActor = 0;
+        static float lastDistance = -1;
+        if (anyActor != lastActor || std::fabs(anyDistance - lastDistance) > 3) {  // once per place, not every 2 s
+            lastActor = anyActor;
+            lastDistance = anyDistance;
+            logf("posters: nothing to dock within %.0f m of you (at %.1f %.1f %.1f): the nearest poster is %016llx, %.1f m away (%s)",
+                 DOCK_REACH, player.x, player.y, player.z, anyActor, anyDistance, anyWhy);
+        }
+        answer(dockedState(), docks.empty() ? (bestCs ? "No poster within 10 m of you. Get closer to one." : "No poster here can show the arcade.") : "Docked on %zu poster(s).", docks.size());
+        return;
+    }
     void* gs = at<void*>(bestCs, 0x80);
     const PosterInfo& info = POSTERS[posterOf(gs, at<U>(at<P>(bestCs, 0x108), size_t(best) * 16))];
     if (covered(bestCs, info.mesh) || refused.count(info.actor)) {
@@ -397,7 +453,7 @@ void restoreRemembered() {
         P keys = at<P>(cs, 0x108);
         for (unsigned i = 0; i < count && keys; i++) {
             int which = posterOf(gs, at<U>(keys, size_t(i) * 16));
-            if (which < 0 || !hasFace(POSTERS[which].mesh)) continue;
+            if (which < 0 || !hasFace(POSTERS[which].mesh) || banner(POSTERS[which].mesh)) continue;
             const PosterInfo& info = POSTERS[which];
             if (!remembered.count(info.actor) || refused.count(info.actor) || covered(cs, info.mesh)) continue;
             if (dockSlot(cs, i, gamespaceXform(gs)) == 0)
@@ -420,8 +476,17 @@ void describe(void* cs) {
         U handle = at<U>(keys, size_t(i) * 16);
         size_t index = size_t(handle & 0xffff);
         P b8 = at<P>(names, 0xb8), n80 = at<P>(names, 0x80);
-        logf("posters:   slot %u handle %016llx: +0xb8 %016llx, +0x80 %016llx -> %s", i, handle,
-             b8 ? at<U>(b8, index * 8) : NONE, n80 ? at<U>(n80, index * 8) : NONE, posterOf(gs, handle) >= 0 ? "known" : "unknown");
+        int which = posterOf(gs, handle);
+        P item = at<P>(cs, 0x100) + size_t(i) * POSTER_STRIDE;
+        char where[96] = "";
+        if (which >= 0) {
+            Vec c = centerOf(POSTERS[which], space);
+            snprintf(where, sizeof(where), ", model %u at %.1f %.1f %.1f", POSTERS[which].mesh, c.x, c.y, c.z);
+        }
+        logf("posters:   slot %u handle %016llx: +0xb8 %016llx, +0x80 %016llx -> %s%s; slice %u, art %016llx, replaces %016llx, server %016llx", i, handle,
+             b8 ? at<U>(b8, index * 8) : NONE, n80 ? at<U>(n80, index * 8) : NONE,
+             which < 0 ? "unknown" : !hasFace(POSTERS[which].mesh) ? "known, no face map" : banner(POSTERS[which].mesh) ? "known, a banner (left alone)" : "known",
+             where, at<unsigned>(item, 4), at<U>(item, 0x08), at<U>(item, 0x10), at<U>(item, 0x48));
     }
 }
 
@@ -431,7 +496,10 @@ void maintain() {
         Dock& d = docks[k];
         if (!slotStill(d)) {
             logf("posters: poster %016llx went away; %zu dock(s) left", d.actor, docks.size() - 1);
+            void* cs = d.cs;
+            unsigned index = d.index, mesh = d.mesh;
             docks.erase(docks.begin() + long(k));
+            restoreSiblings(cs, index, mesh);
             syncStream();
             if (docks.empty()) releaseFingers();
             answer(dockedState(), docks.empty() ? "The poster went away; undocked." : "Docked on %zu poster(s).", docks.size());
@@ -450,7 +518,10 @@ void maintain() {
             if (r != 0) {
                 at<U>(item, 0x08) = d.savedName;
                 logf("posters: the server replaced %016llx (%d); that one is undocked", d.actor, r);
+                void* cs = d.cs;
+                unsigned index = d.index, mesh = d.mesh;
                 docks.erase(docks.begin() + long(k));
+                restoreSiblings(cs, index, mesh);
                 syncStream();
                 if (docks.empty()) releaseFingers();
                 answer(dockedState(), docks.empty() ? "The server replaced the poster; undocked." : "Docked on %zu poster(s).", docks.size());

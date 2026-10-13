@@ -133,3 +133,19 @@ bool routeProcessAudio(DWORD pid, const AudioTarget& target) {
     lastAudioError = FAILED(a) ? a : b;
     return SUCCEEDED(a) && SUCCEEDED(b);
 }
+
+// The process's own device choice forgotten (an empty device): it plays on Windows' default
+// device again, as the Sound settings' "Reset" for that app does.
+bool clearProcessAudio(DWORD pid) {
+    static const wchar_t cls[] = L"Windows.Media.Internal.AudioPolicyConfig";
+    HSTRING className = nullptr;
+    if (FAILED(WindowsCreateString(cls, UINT32(wcslen(cls)), &className))) return false;
+    ComPtr<IAudioPolicyConfigFactory> factory;
+    HRESULT hr = RoGetActivationFactory(className, __uuidof(IAudioPolicyConfigFactory), &factory);
+    WindowsDeleteString(className);
+    if (FAILED(hr)) { lastAudioError = hr; return false; }
+    HRESULT a = factory->SetPersistedDefaultAudioEndpoint(pid, eRender, eMultimedia, nullptr);
+    HRESULT b = factory->SetPersistedDefaultAudioEndpoint(pid, eRender, eConsole, nullptr);
+    lastAudioError = FAILED(a) ? a : b;
+    return SUCCEEDED(a) && SUCCEEDED(b);
+}
