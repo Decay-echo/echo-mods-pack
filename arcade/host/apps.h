@@ -79,6 +79,11 @@ private:
     uint64_t started_ = 0, quitAt_ = 0, lastPlace_ = 0, lastWindow_ = 0, lastLook_ = 0;
     bool minecraftAlive_ = false;   // Minecraft: its windows are still up (the launcher process may be gone)
     HWND minecraftGame_ = nullptr;  // the game's own window, once it is up
+    std::wstring minecraftName_;    // the launcher chosen (its windows are found by that name)
+    // Every process this session put on the tablet (the one it started, a launcher's, the
+    // game's): all ended on kill(), and by the watchdog if the host dies first (Echo closing).
+    std::vector<DWORD> owned_;
+    void own(DWORD pid);
     bool padState_[PadCount] = {};
     int16_t stick_[2][2] = {};
     MpvControl mpv_;

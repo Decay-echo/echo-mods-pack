@@ -7,6 +7,7 @@
 #pragma once
 #include "apps.h"
 #include "touchpad.h"
+#include <tlhelp32.h>
 #include <cstdio>
 #include <string>
 #include <unordered_map>
@@ -74,12 +75,14 @@ inline void prepareOptions() {
     }
 }
 
-// The game's window (GLFW, "Minecraft ...") if it is up, else the launcher's.
+// The game's window (GLFW, "Minecraft ...") if it is up, else the launcher's: the process we
+// started, or a window named after the launcher (CurseForge runs inside Overwolf, the Store
+// launcher inside its own container: neither is our process).
 struct Windows {
     HWND game = nullptr, launcher = nullptr;
 };
-inline Windows find(DWORD launcherPid) {
-    struct Ctx { DWORD pid; Windows w; } ctx{launcherPid, {}};
+inline Windows find(DWORD launcherPid, const wchar_t* launcherTitle = L"Minecraft Launcher") {
+    struct Ctx { DWORD pid; const wchar_t* title; Windows w; } ctx{launcherPid, launcherTitle, {}};
     EnumWindows([](HWND hwnd, LPARAM p) -> BOOL {
         auto c = reinterpret_cast<Ctx*>(p);
         if (!IsWindowVisible(hwnd) || GetWindow(hwnd, GW_OWNER)) return TRUE;
@@ -93,10 +96,57 @@ inline Windows find(DWORD launcherPid) {
         GetWindowThreadProcessId(hwnd, &pid);
         if (pid == GetCurrentProcessId()) return TRUE;
         if (!c->w.game && !wcscmp(cls, L"GLFW30") && wcsstr(title, L"Minecraft")) c->w.game = hwnd;
-        else if (!c->w.launcher && (pid == c->pid || wcsstr(title, L"Minecraft Launcher"))) c->w.launcher = hwnd;
+        else if (!c->w.launcher && (pid == c->pid || (c->title && *c->title && wcsstr(title, c->title)))) c->w.launcher = hwnd;
         return TRUE;
     }, reinterpret_cast<LPARAM>(&ctx));
     return ctx.w;
+}
+
+// What to look for in the launcher's window title: the word its windows carry.
+inline const wchar_t* launcherTitle(const std::wstring& name) {
+    if (name.find(L"CurseForge") != std::wstring::npos) return L"CurseForge";
+    if (name.find(L"Modrinth") != std::wstring::npos) return L"Modrinth";
+    if (name.find(L"Prism") != std::wstring::npos) return L"Prism Launcher";
+    return L"Minecraft Launcher";
+}
+
+// Ends a process and everything it started (Toolhelp: children by parent id).
+inline void killTree(DWORD pid, int depth = 0) {
+    if (!pid || pid == GetCurrentProcessId() || depth > 8) return;
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snap != INVALID_HANDLE_VALUE) {
+        PROCESSENTRY32W e{sizeof e};
+        std::vector<DWORD> children;
+        for (BOOL ok = Process32FirstW(snap, &e); ok; ok = Process32NextW(snap, &e))
+            if (e.th32ParentProcessID == pid && e.th32ProcessID != pid) children.push_back(e.th32ProcessID);
+        CloseHandle(snap);
+        for (DWORD child : children) killTree(child, depth + 1);
+    }
+    if (HANDLE h = OpenProcess(PROCESS_TERMINATE, FALSE, pid)) {
+        TerminateProcess(h, 0);
+        CloseHandle(h);
+    }
+}
+
+// The list of processes the tablet put up (the watchdog ends them if the host dies first).
+inline std::wstring ownedFile() { return localAppData() + L"\\EchoArcade\\owned.txt"; }
+inline void writeOwned(const std::vector<DWORD>& pids) {
+    std::wstring path = ownedFile();
+    if (pids.empty()) { DeleteFileW(path.c_str()); return; }
+    CreateDirectoryW((localAppData() + L"\\EchoArcade").c_str(), nullptr);
+    FILE* f = nullptr;
+    if (_wfopen_s(&f, path.c_str(), L"w") != 0 || !f) return;
+    for (DWORD pid : pids) fprintf(f, "%lu\n", pid);
+    fclose(f);
+}
+inline std::vector<DWORD> readOwned() {
+    std::vector<DWORD> pids;
+    FILE* f = nullptr;
+    if (_wfopen_s(&f, ownedFile().c_str(), L"r") != 0 || !f) return pids;
+    unsigned long pid;
+    while (fscanf_s(f, "%lu", &pid) == 1) pids.push_back(DWORD(pid));
+    fclose(f);
+    return pids;
 }
 
 // A process's biggest visible window (Echo VR's, to give the focus back to).

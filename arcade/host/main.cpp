@@ -244,7 +244,7 @@ private:
         push(s);
     }
     void startMinecraft(const Launcher& l) {
-        if (!session_.launch(AppId::Minecraft, l.exe, 0, {}, 0, l.args)) { message_ = L"Could not start " + l.name + L" (see host.log)."; return; }
+        if (!session_.launch(AppId::Minecraft, l.exe, 0, {l.name}, 0, l.args)) { message_ = L"Could not start " + l.name + L" (see host.log)."; return; }
         hostLog("minecraft: starting %ls%s", l.name.c_str(), freeze_ ? " (frozen already: it gets the controllers when its window is up)" : "");
         if (freeze_) { if (!echoWindow_) echoWindow_ = GetForegroundWindow(); lastRefocus_ = 0; }
         gunUsed_ = false;
@@ -1889,7 +1889,42 @@ private:
 
 }  // namespace
 
+// ArcadeHost.exe --watchdog <pid>: waits for that host to end, then ends every process it had
+// put on the tablet (owned.txt). Started outside Echo VR's job, so it outlives the host when
+// Echo closes and takes the host with it.
+int watchdog(DWORD hostPid) {
+    HANDLE host = OpenProcess(SYNCHRONIZE, FALSE, hostPid);
+    if (!host) return 1;
+    WaitForSingleObject(host, INFINITE);
+    CloseHandle(host);
+    Sleep(1500);  // a host closing its apps itself empties the list first
+    std::vector<DWORD> pids = minecraft::readOwned();
+    for (DWORD pid : pids) minecraft::killTree(pid);
+    minecraft::writeOwned({});
+    hostLog("watchdog: host %lu gone; ended %zu process(es) it had started", hostPid, pids.size());
+    return 0;
+}
+
+void startWatchdog() {
+    wchar_t self[MAX_PATH];
+    GetModuleFileNameW(nullptr, self, MAX_PATH);
+    std::wstring cmd = L"\"" + std::wstring(self) + L"\" --watchdog " + std::to_wstring(GetCurrentProcessId());
+    STARTUPINFOW si{sizeof(si)};
+    PROCESS_INFORMATION pi{};
+    for (DWORD flags : {DWORD(CREATE_BREAKAWAY_FROM_JOB | CREATE_NO_WINDOW), DWORD(CREATE_NO_WINDOW)}) {
+        std::wstring line = cmd;
+        if (CreateProcessW(self, line.data(), nullptr, nullptr, FALSE, flags, nullptr, nullptr, &si, &pi)) {
+            CloseHandle(pi.hThread);
+            CloseHandle(pi.hProcess);
+            hostLog("watchdog: pid %lu%s", pi.dwProcessId, flags & CREATE_BREAKAWAY_FROM_JOB ? "" : " (could not leave the job: it ends with Echo too)");
+            return;
+        }
+    }
+    hostLog("watchdog: could not start (%lu)", GetLastError());
+}
+
 int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR cmdLine, int) {
+    if (const wchar_t* w = wcsstr(cmdLine, L"--watchdog ")) return watchdog(DWORD(_wtoi(w + 11)));
     HANDLE single = CreateMutexW(nullptr, TRUE, L"Local\\EchoArcade.Host");
     if (GetLastError() == ERROR_ALREADY_EXISTS) return 0;
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
@@ -1899,6 +1934,9 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR cmdLine, int) {
     arcade::Shared* shared = arcade::open(&mapping);
     if (!shared) { hostLog("shared memory unavailable (%lu)", GetLastError()); return 1; }
     hostLog("ArcadeHost started pid=%lu standalone=%d", GetCurrentProcessId(), int(standalone));
+    for (DWORD pid : minecraft::readOwned()) minecraft::killTree(pid);  // left from a host that died without its watchdog
+    minecraft::writeOwned({});
+    startWatchdog();
     {
         Host host(shared, standalone);
         host.run();

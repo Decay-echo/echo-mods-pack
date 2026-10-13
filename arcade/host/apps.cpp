@@ -204,12 +204,19 @@ Rect Session::contentRect() const {
     return {0, 0, SCREEN_W, SCREEN_H};
 }
 
+void Session::own(DWORD pid) {
+    if (!pid || std::find(owned_.begin(), owned_.end(), pid) != owned_.end()) return;
+    owned_.push_back(pid);
+    minecraft::writeOwned(owned_);
+}
+
 bool Session::launch(AppId id, const std::wstring& target, double startSeconds,
                      const std::vector<std::wstring>& playlist, int playlistStart, const std::wstring& extra) {
     kill();
     id_ = id;
     minecraftAlive_ = false;
     minecraftGame_ = nullptr;
+    minecraftName_.clear();
     std::wstring exe, args, cwd;
     AudioTarget audio = findAudioDevice(config_.audioDevice);
     auto setEnv = [](const wchar_t* k, const std::wstring& v) { SetEnvironmentVariableW(k, v.empty() ? nullptr : v.c_str()); };
@@ -225,6 +232,7 @@ bool Session::launch(AppId id, const std::wstring& target, double startSeconds,
         setEnv(L"ECHO_ARCADE_HEIGHT", std::to_wstring(SCREEN_H));
     } else if (id == AppId::Minecraft) {
         minecraft::prepareOptions();
+        minecraftName_ = playlist.empty() ? L"" : playlist[0];  // the launcher's name rides in the playlist slot
         if (target.rfind(L"shell:", 0) == 0) {  // a Store app: explorer starts it and goes away
             wchar_t sys[MAX_PATH];
             GetSystemDirectoryW(sys, MAX_PATH);
@@ -279,6 +287,7 @@ bool Session::launch(AppId id, const std::wstring& target, double startSeconds,
     // Route its sound to the headset. Windows refuses (E_INVALIDARG) until the process
     // has started, and moves any sound it already plays when the route is set.
     ResumeThread(pi.hThread);
+    if (!(id == AppId::Minecraft && target.rfind(L"shell:", 0) == 0)) own(pi.dwProcessId);  // not explorer
     if (audio.id.empty()) hostLog("audio: no device matching \"%ls\"; using the Windows default", config_.audioDevice.c_str());
     routeAudioLater(pi.dwProcessId, audio, config_.appVolume, "app");
     CloseHandle(pi.hThread);
@@ -317,14 +326,17 @@ void Session::poll() {
         uint64_t now = GetTickCount64();
         if (now - lastLook_ > 500) {
             lastLook_ = now;
-            minecraft::Windows w = minecraft::find(pid_);
+            minecraft::Windows w = minecraft::find(pid_, minecraft::launcherTitle(minecraftName_));
             bool processUp = WaitForSingleObject(process_, 0) == WAIT_TIMEOUT;
-            minecraftAlive_ = processUp || w.game || w.launcher || now - started_ < 20000;
+            minecraftAlive_ = processUp || w.game || w.launcher || now - started_ < 60000;  // Overwolf can take a while to come up
             HWND want = w.game ? w.game : w.launcher;
             if (want && want != window_) {
                 if (window_) capture_.stop();
                 window_ = want;
                 lastPlace_ = now;
+                DWORD windowPid = 0;
+                GetWindowThreadProcessId(want, &windowPid);
+                own(windowPid);
                 if (w.game && w.game != minecraftGame_) {
                     minecraftGame_ = w.game;
                     DWORD gamePid = 0;
@@ -342,7 +354,7 @@ void Session::poll() {
                 hostLog("minecraft: showing the %s window %p", w.game ? "game" : "launcher", static_cast<void*>(want));
             }
         }
-        if (!minecraftAlive_) { hostLog("minecraft: its windows are gone"); kill(); }
+        if (!minecraftAlive_) { hostLog("minecraft: no window of %ls or the game for a minute; giving up", minecraftName_.c_str()); kill(); }
         return;
     }
     if (window_) {
@@ -403,11 +415,9 @@ void Session::kill() {
     mpv_.disconnect();
     capture_.stop();
     window_ = nullptr;
-    if (id_ == AppId::Minecraft && minecraftGame_ && IsWindow(minecraftGame_)) {  // the game is another process
-        DWORD gamePid = 0;
-        GetWindowThreadProcessId(minecraftGame_, &gamePid);
-        if (HANDLE h = gamePid ? OpenProcess(PROCESS_TERMINATE, FALSE, gamePid) : nullptr) { TerminateProcess(h, 0); CloseHandle(h); }
-    }
+    for (DWORD pid : owned_) minecraft::killTree(pid);  // the app, a launcher, the game: all of it
+    owned_.clear();
+    minecraft::writeOwned(owned_);
     minecraftGame_ = nullptr;
     minecraftAlive_ = false;
     if (process_) {
