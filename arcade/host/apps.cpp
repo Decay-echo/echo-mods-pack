@@ -189,9 +189,11 @@ std::vector<AppInfo> listApps(const Config& c) {
     apps.push_back({AppId::YouTube, L"YOUTUBE", exists(c.ytdlp) ? L"Home, search, your links" : L"Your browser's YouTube",
                     L"", rgb(255, 48, 64)});
     apps.push_back({AppId::Media, L"MEDIA", L"Play, skip, volume: whatever plays on this PC", L"", rgb(60, 170, 110)});
-    apps.push_back({AppId::Split, L"SPLIT SCREEN", L"Up to 4 friends' tablets at once, one code", L"", rgb(200, 60, 160)});
-    apps.push_back({AppId::Share, L"SHARE MY TABLET", L"Friends watch your tablet with a code", L"", rgb(210, 120, 40)});
-    apps.push_back({AppId::Watch, L"WATCH A FRIEND", L"A friend's tablet on yours: videos, games, anything", L"", rgb(40, 150, 210)});
+    if (c.sharing) {
+        apps.push_back({AppId::Split, L"SPLIT SCREEN", L"Up to 4 friends' tablets at once, one code", L"", rgb(200, 60, 160)});
+        apps.push_back({AppId::Share, L"SHARE MY TABLET", L"Friends watch your tablet with a code", L"", rgb(210, 120, 40)});
+        apps.push_back({AppId::Watch, L"WATCH A FRIEND", L"A friend's tablet on yours: videos, games, anything", L"", rgb(40, 150, 210)});
+    }
     // Echo in Echo: a second Echo VR in its desktop mode (-noovr: no headset, a flat window with
     // mouse and keyboard), on the tablet like any other game. For the friends.
     if (c.echoInEcho)

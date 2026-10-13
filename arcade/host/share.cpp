@@ -3,6 +3,7 @@
 #include "thumbs.h"
 #include <ws2tcpip.h>
 #include <mstcpip.h>
+#include <iphlpapi.h>
 #include <objbase.h>
 #include <objidl.h>
 #include <shlwapi.h>
@@ -17,6 +18,7 @@
 
 #pragma comment(lib, "ws2_32.lib")
 #pragma comment(lib, "mmdevapi.lib")
+#pragma comment(lib, "iphlpapi.lib")
 
 namespace {
 
@@ -168,6 +170,40 @@ void timeouts(SOCKET s, DWORD sendMs, DWORD recvMs) {
     setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, reinterpret_cast<const char*>(&sendMs), sizeof sendMs);
     setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&recvMs), sizeof recvMs);
 }
+// A friends-network address on this PC: Tailscale's 100.64.0.0/10, Hamachi's 25.0.0.0/8 or
+// 5.0.0.0/8, or any address on an adapter named after ZeroTier, Radmin, Hamachi or Tailscale.
+// Such an address reaches the PC from any friend on the same network, router or not.
+uint32_t vpnAddress(std::wstring& name) {
+    name.clear();
+    ULONG size = 0;
+    GetAdaptersAddresses(AF_INET, GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER, nullptr, nullptr, &size);
+    if (!size) return 0;
+    std::vector<uint8_t> buffer(size);
+    auto* list = reinterpret_cast<IP_ADAPTER_ADDRESSES*>(buffer.data());
+    if (GetAdaptersAddresses(AF_INET, GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER, nullptr, list, &size) != NO_ERROR) return 0;
+    for (auto* a = list; a; a = a->Next) {
+        if (a->OperStatus != IfOperStatusUp) continue;
+        std::wstring desc = a->Description ? a->Description : L"", friendly = a->FriendlyName ? a->FriendlyName : L"";
+        for (auto& c : desc) c = wchar_t(towlower(c));
+        for (auto& c : friendly) c = wchar_t(towlower(c));
+        auto named = [&](const wchar_t* what) { return desc.find(what) != std::wstring::npos || friendly.find(what) != std::wstring::npos; };
+        const wchar_t* which = named(L"tailscale") ? L"Tailscale" : named(L"hamachi") ? L"Hamachi" : named(L"zerotier") ? L"ZeroTier" : named(L"radmin") ? L"Radmin VPN" : nullptr;
+        for (auto* u = a->FirstUnicastAddress; u; u = u->Next) {
+            if (!u->Address.lpSockaddr || u->Address.lpSockaddr->sa_family != AF_INET) continue;
+            uint32_t ip = ntohl(reinterpret_cast<sockaddr_in*>(u->Address.lpSockaddr)->sin_addr.s_addr);
+            if (!which) {
+                if ((ip & 0xffc00000u) == 0x64400000u) which = L"Tailscale";                        // 100.64.0.0/10
+                else if ((ip >> 24) == 25 || (ip >> 24) == 5) which = L"Hamachi";                   // 25/8, 5/8
+                else continue;
+            }
+            if ((ip >> 24) == 127 || (ip & 0xffff0000u) == 0xa9fe0000u) continue;
+            name = which;
+            return ip;
+        }
+    }
+    return 0;
+}
+
 uint32_t lanAddress() {
     winsock();
     SOCKET s = socket(AF_INET, SOCK_DGRAM, 0);
@@ -424,6 +460,7 @@ std::wstring ShareServer::status() const {
 }
 std::wstring ShareServer::code() const { return publicIp_ ? shareCodeText(publicIp_, port_, secret_) : L""; }
 std::wstring ShareServer::lanCode() const { return lanIp_ ? shareCodeText(lanIp_, port_, secret_) : L""; }
+std::wstring ShareServer::vpnCode() const { return vpnIp_ ? shareCodeText(vpnIp_, port_, secret_) : L""; }
 
 void ShareServer::start(uint16_t port, const std::wstring& name, bool split) {
     if (running_) return;
@@ -516,6 +553,8 @@ void ShareServer::stop() {
 void ShareServer::findAddress() {
     CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     lanIp_ = lanAddress();
+    vpnIp_ = vpnAddress(vpnName_);
+    if (vpnIp_) hostLog("share: %ls address %ls (the VPN code reaches this PC from any friend on it)", vpnName_.c_str(), dotted(vpnIp_).c_str());
     auto body = httpGetBytes(L"https://api.ipify.org");
     std::string text(body.begin(), body.end());
     in_addr addr{};
@@ -544,8 +583,11 @@ void ShareServer::findAddress() {
     }
     if (!publicIp_ && !lanIp_) setStatus(L"No network address found");
     else if (!publicIp_) setStatus(L"No internet address (LAN code only)");
-    else setStatus(mapped_ ? L"" : L"No UPnP: forward TCP port " + std::to_wstring(port_) + L" to this PC");
-    hostLog("share: your code %ls, LAN code %ls", code().empty() ? L"(none)" : code().c_str(), lanCode().empty() ? L"(none)" : lanCode().c_str());
+    else if (mapped_) setStatus(L"");
+    else if (vpnIp_) setStatus(L"No UPnP: friends on " + vpnName_ + L" use the VPN code; others need TCP " + std::to_wstring(port_) + L" forwarded");
+    else setStatus(L"No UPnP: forward TCP port " + std::to_wstring(port_) + L" to this PC");
+    hostLog("share: your code %ls, LAN code %ls, VPN code %ls", code().empty() ? L"(none)" : code().c_str(), lanCode().empty() ? L"(none)" : lanCode().c_str(),
+            vpnCode().empty() ? L"(none)" : vpnCode().c_str());
     CoUninitialize();
 }
 

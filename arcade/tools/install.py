@@ -558,10 +558,9 @@ def install(game: Path):
 def firewall_rule():
     """Windows Firewall lets friends reach SHARE MY TABLET (needs an elevated prompt; otherwise
     Windows asks on the desktop the first time, or the LAN code is what works)."""
-    exe = ROOT / 'dist' / 'EchoArcade' / 'ArcadeHost.exe'
     try:
         r = subprocess.run(['netsh', 'advfirewall', 'firewall', 'add', 'rule', 'name=Echo Arcade tablet share',
-                            'dir=in', 'action=allow', f'program={exe}', 'protocol=TCP', 'localport=6730'],
+                            'dir=in', 'action=allow', 'protocol=TCP', 'localport=6730'],  # the port itself: the host runs from the game's plugin folder
                            capture_output=True, text=True, timeout=20)
         if r.returncode == 0:
             print('Windows Firewall: friends may reach SHARE MY TABLET (rule added).')

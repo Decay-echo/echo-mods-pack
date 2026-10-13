@@ -1345,6 +1345,12 @@ private:
         autoDock_ = GetPrivateProfileIntW(L"dock", L"auto", 1, t.c_str()) != 0;  // on unless turned off
         posterHq_ = _wcsicmp(iniText(t, L"poster", L"quality", L"normal").c_str(), L"high") == 0;
         sidesOn_ = GetPrivateProfileIntW(L"sides", L"enabled", 1, t.c_str()) != 0;
+        bool sharing = GetPrivateProfileIntW(L"share", L"tiles", 1, t.c_str()) != 0;
+        if (sharing != config_.sharing) {
+            config_.sharing = sharing;
+            if (!sharing) { share_.stop(); watch_.disconnect(); }
+            if (mode_ == Mode::Launcher) apps_ = listApps(config_);
+        }
         skipAds_ = GetPrivateProfileIntW(L"youtube", L"skip_ads", 1, t.c_str()) != 0;
         session_.setWindowScale(posterHq_ ? 2 : 1);
         mcLight_ = GetPrivateProfileIntW(L"minecraft", L"light", 1, t.c_str()) != 0;
@@ -1399,7 +1405,11 @@ private:
                                  : L"Poster quality NORMAL: from the next dock.";
         };
         tablet.options.push_back(quality);
-        Option sides{L"Side posters", L"Docked on the lobby's news board: the four posters beside it show listening mode, cross play, Discord and friends", Kind::Toggle};
+        Option sharing{L"Sharing tiles", L"SPLIT SCREEN, SHARE MY TABLET and WATCH A FRIEND on the launcher (they need a port your router opens)", Kind::Toggle};
+        sharing.get = [this] { return config_.sharing ? 1.f : 0.f; };
+        sharing.set = [this, tweaks](float v) { iniWrite(tweaks, L"share", L"tiles", v != 0 ? L"1" : L"0"); loadSettings(); };
+        tablet.options.push_back(sharing);
+        Option sides{L"Side posters", L"Docked on the lobby's news board: the four posters beside it show listening mode, Discord, and cross play and friends (or the tablet, with the sharing tiles off)", Kind::Toggle};
         sides.get = [this] { return sidesOn_ ? 1.f : 0.f; };
         sides.set = [this, tweaks](float v) { sidesOn_ = v != 0; iniWrite(tweaks, L"sides", L"enabled", sidesOn_ ? L"1" : L"0"); };
         tablet.options.push_back(sides);
@@ -2424,11 +2434,19 @@ private:
         lastSides_ = now;
         for (int i = 0; i < arcade::SIDES; i++) {
             target_ = &side_[i];
-            switch (i) {
-                case SIDE_LISTEN: drawListening(); break;
-                case SIDE_CROSS: drawCrossPlay(); break;
-                case SIDE_DISCORD: drawDiscordPoster(); break;
-                default: drawFriendsPoster(); break;
+            if (config_.sharing) {
+                switch (i) {
+                    case SIDE_LISTEN: drawListening(); break;
+                    case SIDE_CROSS: drawCrossPlay(); break;
+                    case SIDE_DISCORD: drawDiscordPoster(); break;
+                    default: drawFriendsPoster(); break;
+                }
+            } else {  // no sharing: listening, Discord, and the tablet on the two below
+                switch (i) {
+                    case SIDE_LISTEN: drawListening(); break;
+                    case SIDE_CROSS: drawDiscordPoster(); break;
+                    default: canvas_.blit(reinterpret_cast<const uint8_t*>(screen_.pixels()), SCREEN_W, SCREEN_H, SCREEN_W * 4, {0, 0, SCREEN_W, SCREEN_H}); break;
+                }
             }
             canvas_.opaque();
             target_ = &screen_;
@@ -2510,7 +2528,12 @@ private:
             std::wstring c = share_.code();
             canvas_.text({24, y, SCREEN_W - 24, y + 34}, share_.split() ? L"Split screen is on. Friends join with:" : L"Your tablet is shared. Friends watch with:", 24, rgb(200, 210, 230), false, 0);
             canvas_.text({24, y + 40, SCREEN_W - 24, y + 110}, c.empty() ? share_.lanCode() : c, 56, rgb(255, 255, 255), true, 0);
-            if (!c.empty() && !share_.lanCode().empty()) canvas_.text({24, y + 112, SCREEN_W - 24, y + 142}, L"LAN code " + share_.lanCode(), 20, rgb(150, 160, 180), false, 0);
+            {
+                std::wstring more;
+                if (!share_.vpnCode().empty()) more = share_.vpnName() + L" code " + share_.vpnCode();
+                if (!c.empty() && !share_.lanCode().empty()) more += (more.empty() ? L"" : L"   -   ") + std::wstring(L"LAN code ") + share_.lanCode();
+                if (!more.empty()) canvas_.text({24, y + 112, SCREEN_W - 24, y + 142}, more, 20, rgb(150, 160, 180), false, 0);
+            }
             int n = share_.viewers();
             canvas_.text({24, y + 150, SCREEN_W - 24, y + 184}, std::to_wstring(n) + (n == 1 ? L" friend connected" : L" friends connected"), 24, rgb(200, 210, 230), false, 0);
             y += 200;
@@ -2531,7 +2554,7 @@ private:
         if (watch_.active()) canvas_.text({24, SCREEN_H - 40, SCREEN_W - 24, SCREEN_H - 8}, L"Watching " + watch_.friendName(), 20, rgb(90, 200, 255), false, 0);
     }
     void sideTouch(const Touch& t) {
-        if (t.side != SIDE_CROSS) { if (!t.down) pressed_ = -1; return; }
+        if (t.side != SIDE_CROSS || !config_.sharing) { if (!t.down) pressed_ = -1; return; }
         if (tapped(t, 840, SIDE_BIG_BUTTON)) {
             if (share_.running() && share_.split()) { mode_ = Mode::Split; splitBarUntil_ = GetTickCount64() + 6000; }
             else if (watch_.active()) { mode_ = Mode::Watch; watchBarUntil_ = GetTickCount64() + 6000; }
@@ -2595,7 +2618,8 @@ private:
     }
     std::wstring tileNote(const AppInfo& a) const {
         if ((a.id == AppId::Share || a.id == AppId::Split) && share_.running()) {
-            std::wstring c = share_.code();
+            std::wstring c = share_.code(), vpn = share_.vpnCode();
+            if (!vpn.empty() && !share_.status().empty()) return vpn;  // the router did not open the port: the VPN code is the one that works
             return c.empty() ? share_.lanCode() : c;
         }
         return a.missing;
@@ -2611,7 +2635,8 @@ private:
         std::wstring c = share_.code(), lan = share_.lanCode(), st = share_.status();
         s.entries.push_back({c.empty() ? L"Finding your internet address..." : L"Your code:   " + c,
                              L"Friends type it in WATCH A FRIEND > Enter a code (from anywhere on the internet)", nullptr});
-        if (!lan.empty()) s.entries.push_back({L"LAN code:   " + lan, L"For a friend on the same network or VPN", nullptr});
+        if (!share_.vpnCode().empty()) s.entries.push_back({L"VPN code:   " + share_.vpnCode(), L"For friends on your " + share_.vpnName() + L" network: works from anywhere, no router setup", nullptr});
+        if (!lan.empty()) s.entries.push_back({L"LAN code:   " + lan, L"For a friend on the same Wi-Fi", nullptr});
         if (!st.empty()) s.entries.push_back({st, L"The router did not open the port by itself: forward it, or friends use the LAN code", nullptr});
         int n = share_.viewers();
         s.entries.push_back({std::to_wstring(n) + (n == 1 ? L" friend watching" : L" friends watching"),
@@ -2748,9 +2773,14 @@ private:
         if (panes.empty()) {
             split_.text({0, 140, SCREEN_W, 200}, L"SPLIT SCREEN", 44, rgb(230, 120, 220));
             split_.text({0, 212, SCREEN_W, 252}, L"Friends join in WATCH A FRIEND > Enter a code:", 24, rgb(200, 205, 220), false);
-            std::wstring c = share_.code(), lan = share_.lanCode();
-            split_.text({0, 262, SCREEN_W, 332}, c.empty() ? (lan.empty() ? L"finding your address..." : lan) : c, 56, rgb(90, 200, 255));
-            if (!c.empty() && !lan.empty()) split_.text({0, 342, SCREEN_W, 377}, L"LAN code " + lan, 22, rgb(150, 160, 180), false);
+            std::wstring c = share_.code(), lan = share_.lanCode(), vpn = share_.vpnCode();
+            bool vpnFirst = !vpn.empty() && !share_.status().empty();
+            split_.text({0, 262, SCREEN_W, 332}, vpnFirst ? vpn : c.empty() ? (lan.empty() ? L"finding your address..." : lan) : c, 56, rgb(90, 200, 255));
+            std::wstring more;
+            if (vpnFirst) more = L"(" + share_.vpnName() + L" code)   internet code " + c;
+            else if (!vpn.empty()) more = L"VPN code " + vpn;
+            if (!lan.empty()) more += (more.empty() ? L"" : L"   -   ") + std::wstring(L"LAN code ") + lan;
+            if (!more.empty()) split_.text({0, 342, SCREEN_W, 377}, more, 22, rgb(150, 160, 180), false);
             std::wstring st = share_.status();
             if (!st.empty()) split_.text({0, 392, SCREEN_W, 427}, st, 22, rgb(255, 170, 90), false);
             return;

@@ -59,6 +59,8 @@ public:
     bool split() const { return split_; }
     std::wstring code() const;     // the public code ("" until the address is known)
     std::wstring lanCode() const;  // the LAN code
+    std::wstring vpnCode() const;  // the code on a friends network (Tailscale, Hamachi, ZeroTier, Radmin), "" without one
+    std::wstring vpnName() const { return vpnName_; }
     std::wstring status() const;   // one line for the tile
     int viewers() const { return viewers_; }
     std::vector<Participant> participants() const;  // the connected viewers, in the order they came
@@ -84,7 +86,8 @@ private:
     std::atomic<int> viewers_{0};
     SOCKET listen_ = INVALID_SOCKET;
     uint16_t port_ = 0, secret_ = 0;
-    uint32_t publicIp_ = 0, lanIp_ = 0;
+    uint32_t publicIp_ = 0, lanIp_ = 0, vpnIp_ = 0;
+    std::wstring vpnName_;
     bool mapped_ = false;
     std::wstring name_;
     mutable std::mutex statusLock_;
