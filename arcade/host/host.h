@@ -56,8 +56,7 @@ struct Config {
     std::wstring minecraft, curseforge, modrinth, prism;  // Minecraft launchers ([paths]; empty = found by itself)
     bool moviesTile = false;          // MOVIES on the launcher instead of MINECRAFT
     bool sharing = false;             // the SPLIT SCREEN / SHARE MY TABLET / WATCH A FRIEND tiles (echo_tweaks.ini [share] tiles=1; off unless asked for)
-    bool minecraftSleep = false;      // Minecraft's game suspended outright while hidden (echo_tweaks.ini [cpu] minecraft_sleep); off: idle priority
-    bool minecraftMinimize = true;    // Minecraft's window minimized while hidden (echo_tweaks.ini [minecraft] minimize_hidden): 1.21.2+ then draws 10 fps
+    int minecraftPaused = 2;          // parked Minecraft (FREEZE off, a new level, HOME): 0 runs on, 1 minimized, 2 asleep in singleplayer (echo_tweaks.ini [minecraft] paused=run|minimize|sleep)
     float minecraftLookScale = 1.f;   // SETTINGS > TABLET > Minecraft look speed (echo_tweaks.ini [minecraft] look_speed), times arcade.ini's base
     bool echoInEcho = false;          // the ECHO VR tile (a second Echo VR in desktop mode); off unless asked for
     float minecraftLook = 3.f;        // FREEZE in Minecraft: the look speed base (arcade.ini); full stick = twice this in mouse pixels a tick

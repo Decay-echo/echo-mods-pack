@@ -148,6 +148,7 @@ public:
             if ((mode_ == Mode::Running || mode_ == Mode::Menu) && !session_.alive()) appClosed();
             pollFreeze(now);
             pollMinecraftFocus(now);
+            pollPark();
             if (mode_ == Mode::Running && session_.windowless() > (session_.id() == AppId::EchoInner ? 120000u : 30000u)) {  // Echo loads for a while
                 message_ = L"It did not open a window in 30 s (see host.log).";
                 session_.kill();
@@ -257,6 +258,7 @@ private:
         if (!app.missing.empty()) { message_ = app.title + L": " + app.missing; return; }
         message_.clear();
         if (background_ && session_.alive() && sameApp(app, backgroundApp_)) {  // back to the running app
+            session_.park(false, "its tile");
             background_ = false;
             current_ = backgroundApp_;
             mode_ = Mode::Running;
@@ -316,6 +318,21 @@ private:
     void minecraftTouch(const Touch& t) {
         if (BALATRO_HOME.contains(t.x, t.y)) { if (!t.down) openMenu(); return; }
         if (!session_.hasWindow()) { if (!t.down) pressed_ = -1; return; }
+        if (session_.parked() || wakeTouch_) {  // parked: the first tap wakes it and clicks nothing
+            if (t.down) {
+                if (session_.parked()) {
+                    session_.park(false, "a tap on its picture");
+                    message_ = L"Minecraft is awake and still paused: FREEZE to play it, or tap its menus.";
+                }
+                wakeTouch_ = true;
+                return;
+            }
+            for (auto& [cell, h] : held_)
+                if (fit_.contains(h.x, h.y)) return;  // the same finger's other cells are still down
+            wakeTouch_ = false;
+            mcFinger_ = false;
+            return;
+        }
         float u, v;
         if (!toApp(t.x, t.y, u, v)) { if (!t.down) mcFinger_ = false; return; }
         HWND window = session_.window();
@@ -390,6 +407,13 @@ private:
         if (echo && GetForegroundWindow() != echo && !minecraft::focus(echo)) hostLog("minecraft: could not give Echo VR the focus back after a tap");
     }
     HWND echoWindow() { return echoWindow_ && IsWindow(echoWindow_) ? echoWindow_ : minecraft::mainWindowOf(DWORD(shared_->gamePid)); }
+    // A new level (a match starting, back to the lobby) with Minecraft up and nobody playing it:
+    // parked, as when FREEZE goes off (FREEZE itself ends on a new level, and parks it there).
+    void pollPark() {
+        if (shared_->levelSerial == parkLevel_) return;
+        parkLevel_ = shared_->levelSerial;
+        if (!freeze_ && session_.alive() && session_.id() == AppId::Minecraft) session_.park(true, "a new level");
+    }
 
     // ------------------------------------------------ movies
     void openMovies() {
@@ -1116,6 +1140,7 @@ private:
         }
         pausedByFreeze_ = false;
         if (mc) {  // keyboard and mouse go to the window in front: Minecraft's, once it is up
+            session_.park(false, "FREEZE");  // awake first: a sleeping window cannot come to the front
             echoWindow_ = GetForegroundWindow();
             if (session_.alive() && !minecraft::focus(session_.window())) message_ = L"Minecraft's window would not come to the front; tap FREEZE again.";
             lastRefocus_ = GetTickCount64();
@@ -1146,6 +1171,7 @@ private:
         if (isDesktop(session_.id())) {  // Echo in front again: Minecraft pauses itself on losing the focus
             mcInput_.releaseAll();
             if (!minecraft::focus(echoWindow())) hostLog("freeze: could not give Echo VR the focus back");
+            session_.park(true, "FREEZE off");  // it paused itself; now out of Echo's way until the tablet wakes it
         }
         message_ = why;
         hostLog("freeze: off");
@@ -1355,8 +1381,10 @@ private:
         autoDock_ = GetPrivateProfileIntW(L"dock", L"auto", 1, t.c_str()) != 0;  // on unless turned off
         posterHq_ = _wcsicmp(iniText(t, L"poster", L"quality", L"normal").c_str(), L"high") == 0;
         sidesOn_ = GetPrivateProfileIntW(L"sides", L"enabled", 1, t.c_str()) != 0;
-        config_.minecraftSleep = GetPrivateProfileIntW(L"cpu", L"minecraft_sleep", 0, t.c_str()) != 0;
-        config_.minecraftMinimize = GetPrivateProfileIntW(L"minecraft", L"minimize_hidden", 1, t.c_str()) != 0;
+        {
+            std::wstring paused = iniText(t, L"minecraft", L"paused", L"sleep");
+            config_.minecraftPaused = _wcsicmp(paused.c_str(), L"run") == 0 ? 0 : _wcsicmp(paused.c_str(), L"minimize") == 0 ? 1 : 2;
+        }
         config_.minecraftLookScale = std::clamp(iniFloat(t, L"minecraft", L"look_speed", 1.f), .25f, 4.f);
         bool sharing = GetPrivateProfileIntW(L"share", L"tiles", 0, t.c_str()) != 0;  // off unless turned on: nobody's tablet is shared by default
         if (sharing != config_.sharing) {
@@ -1424,15 +1452,14 @@ private:
         Option sides{L"Side posters", L"Docked on the lobby's news board: the four posters beside it show listening mode, Discord, and cross play and friends (or the tablet, with the sharing tiles off)", Kind::Toggle};
         sides.get = [this] { return sidesOn_ ? 1.f : 0.f; };
         sides.set = [this, tweaks](float v) { sidesOn_ = v != 0; iniWrite(tweaks, L"sides", L"enabled", sidesOn_ ? L"1" : L"0"); };
-        Option hidden{L"Hidden Minecraft", L"Not on the tablet: RUNS ON at low priority; MINIMIZED also minimizes its window (10 fps on 1.21.2+); ASLEEP freezes it (servers drop you)", Kind::Choice};
-        hidden.choices = {L"RUNS ON", L"MINIMIZED", L"ASLEEP"};
-        hidden.get = [this] { return config_.minecraftSleep ? 2.f : config_.minecraftMinimize ? 1.f : 0.f; };
-        hidden.set = [this, tweaks](float v) {
-            iniWrite(tweaks, L"cpu", L"minecraft_sleep", v == 2 ? L"1" : L"0");
-            iniWrite(tweaks, L"minecraft", L"minimize_hidden", v == 1 ? L"1" : L"0");
+        Option paused{L"Paused Minecraft", L"After FREEZE, until a tap wakes it: ASLEEP in singleplayer (on a server: minimized)", Kind::Choice};
+        paused.choices = {L"RUNS ON", L"MINIMIZED", L"ASLEEP"};
+        paused.get = [this] { return float(config_.minecraftPaused); };
+        paused.set = [this, tweaks](float v) {
+            iniWrite(tweaks, L"minecraft", L"paused", v == 0 ? L"run" : v == 1 ? L"minimize" : L"sleep");
             loadSettings();
         };
-        tablet.options.push_back(hidden);
+        tablet.options.push_back(paused);
         Option light{L"Minecraft light settings", L"When Minecraft starts: render distance 8, simulation 6, no clouds or entity shadows (your own values come back when this is off)", Kind::Toggle};
         light.get = [this] { return mcLight_ ? 1.f : 0.f; };
         light.set = [this, tweaks](float v) {
@@ -1974,6 +2001,7 @@ private:
     // ends it.
     void goHome() {
         if (freeze_) stopFreeze(L"");
+        session_.park(true, "HOME");
         background_ = true;
         backgroundApp_ = current_;
         toLauncher();
@@ -3167,7 +3195,8 @@ private:
         Rect content = padHidden_ && isRetro(session_.id()) ? Rect{0, 0, SCREEN_W, SCREEN_H} : session_.contentRect();
         canvas_.clear(rgb(10, 10, 14));
         uint64_t before = captureSerial_;
-        session_.capture().latest(pixels_, capW_, capH_, captureSerial_);
+        bool parked = session_.parked();
+        if (!parked) session_.capture().latest(pixels_, capW_, capH_, captureSerial_);  // parked: the last picture stays (a minimized window has none)
         if (captureSerial_ != before && captureSerial_ == 1) hostLog("first captured frame %dx%d", capW_, capH_);
         if (session_.hasWindow() && capW_ > 0) {
             canvas_.blit(pixels_.data(), capW_, capH_, capW_ * 4, content);
@@ -3180,7 +3209,13 @@ private:
             std::wstring name = isVideo(session_.id()) ? playing_ : current_.title;
             canvas_.text(content, L"Starting " + name + std::wstring(dots, L'.'), 32, rgb(220, 220, 230));
         }
-        if (isDesktop(session_.id()) && session_.hasWindow() && capW_ > 0) drawCursor();
+        if (parked && session_.hasWindow() && capW_ > 0) {
+            canvas_.blend(fit_, rgb(0, 0, 0), 150);
+            int cy = fit_.y0 + fit_.h() / 2;
+            canvas_.text({fit_.x0, cy - 66, fit_.x1, cy - 6}, L"PAUSED", 46, rgb(255, 255, 255), true);
+            canvas_.text({fit_.x0, cy + 4, fit_.x1, cy + 40}, session_.asleep() ? L"Asleep while you play Echo: tap to wake it"
+                                                                                : L"Out of Echo's way while you play: tap to wake it", 22, rgb(205, 210, 225), false);
+        } else if (isDesktop(session_.id()) && session_.hasWindow() && capW_ > 0) drawCursor();
         if (isVideo(session_.id())) drawPlayerControls();
         else if (isRetro(session_.id())) drawPad();
         else {
@@ -3434,6 +3469,8 @@ private:
     minecraft::Input mcInput_;          // FREEZE in Minecraft: the controllers as keyboard and mouse
     HWND echoWindow_ = nullptr;         // Echo VR's window, to give the focus back to
     bool mcFinger_ = false, mcScrolled_ = false;  // a finger on Minecraft's picture, and whether it slid
+    bool wakeTouch_ = false;            // the finger that woke a parked Minecraft (its lift clicks nothing)
+    LONG parkLevel_ = 0;                // the level pollPark() last saw
     int mcX0_ = 0, mcY0_ = 0, mcX_ = 0, mcY_ = 0;
     POINT mcAt_{};
     uint64_t mcFocusBackAt_ = 0;        // when Echo gets the focus back after a tap on Minecraft

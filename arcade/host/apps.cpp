@@ -1,6 +1,7 @@
 #include "apps.h"
 #include "minecraft.h"
 #include <ws2tcpip.h>
+#include <iphlpapi.h>
 #include <objbase.h>
 #include <cstdio>
 #include <thread>
@@ -376,6 +377,7 @@ void Session::poll() {
         // The launcher first, then the game's own window once it is up (another process). Alive
         // while either is: the launcher may close itself once the game runs.
         uint64_t now = GetTickCount64();
+        if (gameSuspended_) return;  // asleep: its windows stay as they were (a hung window can look gone)
         if (now - lastLook_ > 500) {
             lastLook_ = now;
             minecraft::Windows w = minecraft::find(pid_, minecraft::launcherTitle(minecraftName_));
@@ -457,6 +459,7 @@ void Session::poll() {
 void Session::quit() {
     if (!process_ || quitAt_) return;
     quitAt_ = GetTickCount64();
+    if (parked_) park(false, "quitting");  // asleep, it could not close its window
     if (isRetro(id_)) command("QUIT");
     else if (id_ == AppId::Minecraft) {
         minecraft::Windows w = minecraft::find(pid_);
@@ -491,6 +494,50 @@ void priorityOf(DWORD pid, DWORD cls) {
     HANDLE h = OpenProcess(PROCESS_SET_INFORMATION, FALSE, pid);
     if (h) { SetPriorityClass(h, cls); CloseHandle(h); }
 }
+// Which pages Windows takes back first when RAM runs short: a parked game's, not Echo's.
+void memoryPriorityOf(DWORD pid, ULONG level) {
+    HANDLE h = OpenProcess(PROCESS_SET_INFORMATION, FALSE, pid);
+    if (!h) return;
+    MEMORY_PRIORITY_INFORMATION info{level};
+    SetProcessInformation(h, ProcessMemoryPriority, &info, sizeof info);
+    CloseHandle(h);
+}
+// Is the process on a game server: an established TCP connection to another machine that is
+// not a web one (80, 443)? Minecraft's singleplayer world talks to itself in memory, no socket;
+// a server, Realms, or friends in an opened-to-LAN world are TCP connections.
+bool connectedToServer(DWORD pid) {
+    auto scan = [pid](ULONG family) {
+        DWORD size = 0;
+        GetExtendedTcpTable(nullptr, &size, FALSE, family, TCP_TABLE_OWNER_PID_CONNECTIONS, 0);
+        std::vector<uint8_t> buf(size_t(size) + 4096);
+        size = DWORD(buf.size());
+        if (GetExtendedTcpTable(buf.data(), &size, FALSE, family, TCP_TABLE_OWNER_PID_CONNECTIONS, 0) != NO_ERROR) return false;
+        auto web = [](DWORD port) { u_short p = ntohs(u_short(port)); return p == 80 || p == 443; };
+        if (family == AF_INET) {
+            auto t = reinterpret_cast<const MIB_TCPTABLE_OWNER_PID*>(buf.data());
+            for (DWORD i = 0; i < t->dwNumEntries; i++) {
+                const auto& r = t->table[i];
+                if (r.dwOwningPid != pid || r.dwState != MIB_TCP_STATE_ESTAB) continue;
+                if ((ntohl(r.dwRemoteAddr) >> 24) == 127 || web(r.dwRemotePort)) continue;
+                return true;
+            }
+        } else {
+            auto t = reinterpret_cast<const MIB_TCP6TABLE_OWNER_PID*>(buf.data());
+            for (DWORD i = 0; i < t->dwNumEntries; i++) {
+                const auto& r = t->table[i];
+                if (r.dwOwningPid != pid || r.dwState != MIB_TCP_STATE_ESTAB) continue;
+                const UCHAR* a = r.ucRemoteAddr;
+                bool zero10 = std::all_of(a, a + 10, [](UCHAR c) { return c == 0; });
+                bool loop6 = zero10 && a[10] == 0 && a[11] == 0 && a[12] == 0 && a[13] == 0 && a[14] == 0 && a[15] == 1;
+                bool mapped127 = zero10 && a[10] == 0xff && a[11] == 0xff && a[12] == 127;
+                if (loop6 || mapped127 || web(r.dwRemotePort)) continue;
+                return true;
+            }
+        }
+        return false;
+    };
+    return scan(AF_INET) || scan(AF_INET6);
+}
 // The GPU's own scheduling: a process's drawing can be put behind the others'
 // (D3DKMTSetProcessSchedulingPriorityClass; 0 idle, 1 below normal, 2 normal, 3 above, 4 high).
 // Lowering needs no privilege; a VR game on a small GPU dies when a desktop game draws as an equal.
@@ -511,40 +558,75 @@ bool gpuPriorityOf(DWORD pid, int cls) {
 }
 }  // namespace
 
+void Session::park(bool on, const char* why) {
+    if (on && (id_ != AppId::Minecraft || !minecraftGame_ || !IsWindow(minecraftGame_))) return;  // Minecraft's game, once it is up
+    if (on == parked_) return;
+    parked_ = on;
+    parkedAt_ = GetTickCount64();
+    serverCheckAt_ = 0;
+    lastPriority_ = -1;  // CPU, GPU and memory priority again on the next background()
+    if (!on) {  // awake right now: FREEZE focuses the window in the same breath
+        if (gameSuspended_) { suspendProcess(suspendedPid_, false); gameSuspended_ = false; }
+        if (minimizedWindow_) {
+            HWND back = minimizedWindow_;
+            minimizedWindow_ = nullptr;
+            if (IsWindow(back) && IsIconic(back)) std::thread([back] { ShowWindow(back, SW_SHOWNOACTIVATE); }).detach();
+        }
+    }
+    hostLog("minecraft: %s (%s)", on ? "parked: paused and out of Echo's way until the tablet wakes it" : "awake", why);
+}
+
 void Session::background(bool shown, bool playing) {
     if (!process_ || !isDesktop(id_)) return;
+    bool mc = id_ == AppId::Minecraft;
+    uint64_t now = GetTickCount64();
     DWORD gamePid = 0;
-    if (id_ == AppId::Minecraft && minecraftGame_) GetWindowThreadProcessId(minecraftGame_, &gamePid);
+    if (mc && minecraftGame_ && IsWindow(minecraftGame_)) {
+        GetWindowThreadProcessId(minecraftGame_, &gamePid);
+        if (!gameSeenAt_) gameSeenAt_ = now;
+    }
     if (id_ == AppId::EchoInner) gamePid = pid_;
-    // Minecraft's game while nobody looks at it or plays it: idle priority (it runs on, so a
-    // server keeps it and a start-up finishes), or, with [cpu] minecraft_sleep, suspended
-    // outright as before (no CPU at all, but it never loads or stays on a server meanwhile).
-    // Echo in Echo is never suspended: it would drop off the server.
-    bool suspend = config_.minecraftSleep && id_ == AppId::Minecraft && gamePid && !shown && !playing;
+    if (parked_ && playing) park(false, "FREEZE");
+    if (parked_ && !gamePid) park(false, "the game's window went away");
+    // Parked Minecraft as Settings > TABLET > Paused Minecraft says. ASLEEP (default): suspended
+    // 3 s after parking (the pause screen has settled), so no CPU and no GPU at all, unless it
+    // is on a server, which would drop you: there it is minimized instead, as with MINIMIZED
+    // (Minecraft 1.21.2 and newer draw 10 frames a second minimized). RUNS ON: idle priority only.
+    // Echo in Echo is never parked: it would drop off its server.
+    int mode = config_.minecraftPaused;  // 0 runs on, 1 minimized, 2 asleep
+    bool parked = parked_ && gamePid;
+    if (parked && mode == 2 && !gameSuspended_ && (!serverCheckAt_ || now - serverCheckAt_ >= 2000)) {
+        serverCheckAt_ = now;
+        bool server = connectedToServer(gamePid);
+        if (server != onServer_) hostLog("minecraft: %s", server ? "on a server: parked minimized, never asleep (the server would drop you)" : "singleplayer (no server connection)");
+        onServer_ = server;
+    }
+    bool suspend = parked && mode == 2 && !onServer_ && serverCheckAt_ && now - parkedAt_ >= 3000;
     if (gameSuspended_ && (!suspend || suspendedPid_ != gamePid)) {
         suspendProcess(suspendedPid_, false);
         gameSuspended_ = false;
-        hostLog("minecraft: running again (%s)", playing ? "FREEZE" : "on the tablet");
+        hostLog("minecraft: awake again");
     }
     if (suspend && !gameSuspended_ && suspendProcess(gamePid, true)) {
         gameSuspended_ = true;
         suspendedPid_ = gamePid;
-        hostLog("minecraft: suspended (not on the tablet; no CPU until it is)");
+        hostLog("minecraft: asleep (parked in singleplayer: no CPU or GPU until the tablet wakes it)");
     }
-    // Hidden Minecraft's window (the one the tablet shows: the launcher's, then the game's)
-    // minimized after 2 s, so a flip of the wrist does nothing: Minecraft 1.21.2 and newer then
-    // draw 10 frames a second and the GPU is Echo's, and nothing of it is on the desktop. Back
-    // the moment the tablet shows it. Never while it sleeps: a suspended process cannot answer
-    // the window messages, which wait on it, so they go out on a thread of their own anyway.
-    HWND target = id_ == AppId::Minecraft ? window_ : nullptr;
-    bool hide = config_.minecraftMinimize && !suspend && target && !shown && !playing;
-    uint64_t now = GetTickCount64();
+    // Its window off the desktop and off the GPU. Parked (MINIMIZED, ASLEEP): the game's window,
+    // right away. Not parked: the window the tablet shows (the launcher's, then the game's), 2 s
+    // after the tablet stops showing it, but never the game's in its first 3 minutes: Minecraft
+    // loads on its frame loop, which a minimized window slows to 10 frames a second. Window
+    // messages go out on a thread of their own (they wait on the game), never to a sleeping one.
+    HWND target = mc ? (parked ? minecraftGame_ : window_) : nullptr;
+    bool loading = target == minecraftGame_ && (!gameSeenAt_ || now - gameSeenAt_ < 180000);
+    bool hide = target && !playing && mode >= 1 && (parked || (!shown && !loading));
     if (!hide) hiddenSince_ = 0;
     else if (!hiddenSince_) hiddenSince_ = now;
-    if (hide && now - hiddenSince_ >= 2000 && !IsIconic(target) && now - minimizedAt_ >= 1000) {
+    if (hide && !gameSuspended_ && (parked || now - hiddenSince_ >= 2000) && !IsIconic(target) && now - minimizedAt_ >= 1000) {
         minimizedAt_ = now;  // once a second at most: a restore by someone else is undone, never fought
         if (minimizedWindow_ != target)
-            hostLog("minecraft: %s window minimized (hidden; Minecraft 1.21.2+ draws 10 frames a second minimized)", target == minecraftGame_ ? "game" : "launcher");
+            hostLog("minecraft: %s window minimized (%s; Minecraft 1.21.2+ draws 10 frames a second minimized)",
+                    target == minecraftGame_ ? "game" : "launcher", parked ? "parked" : "not on the tablet");
         minimizedWindow_ = target;
         std::thread([target] { ShowWindow(target, SW_SHOWMINNOACTIVE); }).detach();
     } else if (!hide && minimizedWindow_) {
@@ -553,20 +635,27 @@ void Session::background(bool shown, bool playing) {
         if (IsWindow(back) && IsIconic(back)) std::thread([back] { ShowWindow(back, SW_SHOWNOACTIVATE); }).detach();
         hostLog("minecraft: window back (%s)", playing ? "FREEZE" : "on the tablet");
     }
-    // CPU and GPU by what the game is to the player right now: played (FREEZE) -> normal on
-    // both (Echo itself runs above normal, so it still comes first); shown on the tablet ->
-    // below normal on both; hidden -> idle on both.
-    int want = playing ? 2 : shown ? 1 : 0;
+    // CPU, GPU and memory by what the game is to the player right now (Echo itself runs above
+    // normal, so it comes first in every case but parked, where Minecraft gets only what is left):
+    //   3 played (FREEZE): normal CPU and GPU
+    //   2 on the tablet, not parked (the launcher, loading, its menus): normal CPU, GPU below normal
+    //   1 not on the tablet, not parked: below normal on both, so a start-up still finishes in time
+    //   0 parked: idle CPU and GPU, and its memory the first Windows takes back when RAM runs short
+    int want = playing ? 3 : parked ? 0 : shown ? 2 : 1;
     if (gamePid && (want != lastPriority_ || gamePid != gpuLoweredPid_)) {
         lastPriority_ = want;
         gpuLoweredPid_ = gamePid;
-        DWORD cls = playing ? NORMAL_PRIORITY_CLASS : shown ? BELOW_NORMAL_PRIORITY_CLASS : IDLE_PRIORITY_CLASS;
-        priorityOf(gamePid, cls);
-        bool gpu = gpuPriorityOf(gamePid, want);  // 2 normal, 1 below normal, 0 idle
+        static const DWORD cpu[4] = {IDLE_PRIORITY_CLASS, BELOW_NORMAL_PRIORITY_CLASS, NORMAL_PRIORITY_CLASS, NORMAL_PRIORITY_CLASS};
+        static const int gpuClass[4] = {0, 1, 1, 2};  // D3DKMT: 0 idle, 1 below normal, 2 normal
+        ULONG memory = want == 0 ? MEMORY_PRIORITY_VERY_LOW : MEMORY_PRIORITY_NORMAL;
+        priorityOf(gamePid, cpu[want]);
+        bool gpu = gpuPriorityOf(gamePid, gpuClass[want]);
+        memoryPriorityOf(gamePid, memory);
         for (DWORD p : owned_)
-            if (p != gamePid) priorityOf(p, BELOW_NORMAL_PRIORITY_CLASS);  // launchers stay low
-        hostLog("%s: %s priority, GPU %s%s", id_ == AppId::Minecraft ? "minecraft" : "echo in echo",
-                playing ? "normal (played)" : shown ? "below normal (shown)" : "idle (hidden)", playing ? "normal" : shown ? "below normal" : "idle", gpu ? "" : " (GPU priority not set)");
+            if (p != gamePid) { priorityOf(p, want == 0 ? IDLE_PRIORITY_CLASS : BELOW_NORMAL_PRIORITY_CLASS); memoryPriorityOf(p, memory); }  // launchers stay low
+        static const char* const names[4] = {"parked: idle CPU and GPU, memory first to go", "not on the tablet: below normal CPU and GPU",
+                                             "on the tablet: normal CPU, GPU below normal", "played: normal CPU and GPU"};
+        hostLog("%s: %s%s", mc ? "minecraft" : "echo in echo", names[want], gpu ? "" : " (GPU priority not set)");
     }
 }
 
@@ -579,6 +668,8 @@ void Session::kill() {
     minimizedWindow_ = nullptr;
     minimizedAt_ = 0;
     hiddenSince_ = 0;
+    parked_ = onServer_ = false;
+    parkedAt_ = gameSeenAt_ = serverCheckAt_ = 0;
     lastPriority_ = -1;
     gpuLoweredPid_ = 0;
     for (DWORD pid : owned_) minecraft::killTree(pid);  // the app, a launcher, the game: all of it

@@ -57,10 +57,15 @@ public:
     WindowCapture& capture() { return capture_; }
     void quit();                 // polite request, then forced after a grace period
     void kill();
-    // CPU and GPU for Echo: a desktop game (Minecraft, Echo in Echo) runs at low priority, at
-    // normal only while it is played (FREEZE); hidden Minecraft (the tablet not showing it,
-    // nobody playing it) runs at idle priority with its window minimized, or suspended outright.
+    // CPU, GPU and memory for Echo: a desktop game (Minecraft, Echo in Echo) by what it is to
+    // the player right now: played (FREEZE), on the tablet, not on it, or parked.
     void background(bool shown, bool playing);
+    // Parked: FREEZE went off (or a new level, or HOME) with Minecraft's game up, so it paused
+    // itself; it stays out of Echo's way (minimized, idle, asleep in singleplayer) until the
+    // tablet wakes it (a tap on its picture, FREEZE, its RUNNING tile). Waking is immediate.
+    void park(bool on, const char* why);
+    bool parked() const { return parked_; }
+    bool asleep() const { return gameSuspended_; }
     uint64_t age() const { return GetTickCount64() - started_; }
     // How long it has had no window: since launch, or since its window went away (RetroArch
     // replaces its window when a core starts).
@@ -100,6 +105,8 @@ private:
     uint64_t hiddenSince_ = 0;       // Minecraft: when the tablet stopped showing it (0 = shown or played)
     HWND minimizedWindow_ = nullptr;  // the Minecraft window we minimized while hidden (the launcher's, or the game's)
     uint64_t minimizedAt_ = 0;
+    bool parked_ = false, onServer_ = false;
+    uint64_t parkedAt_ = 0, gameSeenAt_ = 0, serverCheckAt_ = 0;
     int lastPriority_ = -1;          // 1 normal (played), 0 below normal
     void own(DWORD pid);
     bool padState_[PadCount] = {};
