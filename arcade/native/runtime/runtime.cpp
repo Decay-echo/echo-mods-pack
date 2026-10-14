@@ -23,6 +23,7 @@
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 using U = uint64_t;
@@ -97,10 +98,16 @@ struct Context {
     Mode mode = Mode::Arcade;
     int navState = -1;   // highlighted tab we last drew: 0 stock, 1 ARCADE, 2 SETTINGS
     std::array<View, KINDS> views{};
-    std::set<unsigned> masked;
+    std::unordered_set<unsigned> masked;
     int statusShown = -1;
     std::string statusText;
+    // gate(): what its last full pass saw, per touch-button system, so a pass runs only when
+    // the pool or our state changed (and every 32nd update anyway, in case something slipped by).
+    struct GateState { U key = 0; unsigned ticks = 0; };
+    std::map<void*, GateState> gates;
 };
+unsigned poolGeneration = 0;  // bumped when a canvas loads or unloads (buttons come and go with them)
+unsigned fullGates = 0;       // full passes since the last log line
 std::map<void*, Context> contexts;                          // keyed by gamespace
 std::map<void*, std::pair<void*, unsigned>> canvases;       // canvas -> (gamespace, kind)
 std::set<void*> pending;
@@ -220,6 +227,11 @@ void render(Context& c) {
 }
 
 struct Button { U name; unsigned handle; unsigned short reasons; };
+// Masks our tab buttons, the touch cells and the stock page content by page. A full pass reads
+// every button instance of the touch system (thousands of 400-byte records and 296-byte pool
+// rows, with the 2304 cells), and this hook sits in Echo's button update on its main thread
+// every frame, so the pass only runs when its inputs changed: the counts, the page, our
+// canvases, a canvas load or unload; and every 32nd update as a safety net.
 void gate(Context& c, void* cs) {
     auto resource = at<void*>(cs, 0xd0);
     if (!resource) return;
@@ -227,7 +239,16 @@ void gate(Context& c, void* cs) {
     U count = at<U>(resource, 0x30);
     unsigned n = at<unsigned short>(cs, 0x10a);
     if (count > 8192 || n > count) { failRuntime("unexpected native button pool layout"); return; }
-    std::vector<Button> buttons;
+    bool ready = c.views[0].p && c.views[1].p && c.views[2].p;
+    U key = (U(n) << 40) ^ (count << 16) ^ (U(poolGeneration) << 4) ^ (U(c.page) << 2) ^ (U(ready) << 1) ^ U(fault.load());
+    auto& state = c.gates[cs];
+    if (state.key == key && ++state.ticks % 32 != 0) return;
+    state.key = key;
+    fullGates++;
+    static std::vector<Button> buttons;  // reused between passes (gate runs under the runtime mutex)
+    static std::vector<unsigned> live;
+    buttons.clear();
+    live.clear();
     auto instances = at<P>(cs, 0x110), inverse = at<P>(cs, 0xf0), handles = at<P>(cs, 0xe0), masks = at<P>(cs, 0xf8);
     for (unsigned i = 0; i < n; i++) {
         unsigned row = at<unsigned short>(instances, i * 400);
@@ -239,11 +260,10 @@ void gate(Context& c, void* cs) {
         if (slot >= count) { failRuntime("invalid button handle slot"); return; }
         unsigned h = slot | (unsigned(at<unsigned short>(handles, slot * 4 + 2)) << 16);
         buttons.push_back({name, h, at<unsigned short>(masks, i * 2)});
+        live.push_back(h);
     }
-    std::set<unsigned> live;
-    for (auto& b : buttons) live.insert(b.handle);
-    for (auto it = c.masked.begin(); it != c.masked.end();) it = live.count(*it) ? std::next(it) : c.masked.erase(it);
-    bool ready = c.views[0].p && c.views[1].p && c.views[2].p;
+    std::sort(live.begin(), live.end());
+    for (auto it = c.masked.begin(); it != c.masked.end();) it = std::binary_search(live.begin(), live.end(), *it) ? std::next(it) : c.masked.erase(it);
     for (auto& b : buttons) {
         bool hide;
         if (fault) hide = !isOurTab(b.name) && !isContent(b.name);  // leave stock buttons alone after a fault
@@ -311,12 +331,14 @@ U loaded(void* p, U a, U b, U c) {
     U r = loadedOriginal(p, a, b, c);
     if (r == 0 && !fault) {
         std::lock_guard<std::recursive_mutex> lock(mutex);
+        poolGeneration++;
         safeRemember(p);
     }
     return r;
 }
 
 void unloadLocked(void* p) {
+    poolGeneration++;
     pending.erase(p);
     auto it = canvases.find(p);
     if (it == canvases.end()) return;
@@ -324,7 +346,7 @@ void unloadLocked(void* p) {
     unsigned kind = it->second.second;
     auto& ctx = contexts[gs];
     if (ctx.views[kind].p == p) ctx.views[kind] = View{};
-    if (kind == 0) { ctx.page = Page::Stock; releaseAllTouches(gs); tablet::tabletPresent(false); controllers::levelChanged("the tablet unloaded"); }
+    if (kind == 0) { ctx.page = Page::Stock; ctx.gates.clear(); releaseAllTouches(gs); tablet::tabletPresent(false); controllers::levelChanged("the tablet unloaded"); }
     if (kind == 1) ctx.navState = -1;
     if (kind == 2) ctx.statusShown = -1, ctx.statusText.clear();
     canvases.erase(it);
@@ -349,11 +371,43 @@ void safeButtonTick(void* cs) {
     __try { buttonTick(cs); } __except (EXCEPTION_EXECUTE_HANDLER) { failRuntime("access fault in tablet update"); }
 }
 
+// Our part of Echo's button update, Echo's own, and the posters' part, summed up in
+// runtime.log once a minute: the hook runs on the game's main thread, so this is frame time
+// (a slow PC shows its trouble here).
+struct HookStats { double oursUs = 0, oursMax = 0, gameUs = 0, gameMax = 0, postersUs = 0; unsigned updates = 0; U startedAt = 0; };
+HookStats stats;
+double microseconds() {
+    static const double perTick = [] { LARGE_INTEGER f; QueryPerformanceFrequency(&f); return 1e6 / double(f.QuadPart); }();
+    LARGE_INTEGER t;
+    QueryPerformanceCounter(&t);
+    return double(t.QuadPart) * perTick;
+}
+void account(double ours, double game, double posters) {
+    std::lock_guard<std::recursive_mutex> lock(mutex);
+    U now = GetTickCount64();
+    if (!stats.startedAt) stats.startedAt = now;
+    stats.oursUs += ours; stats.gameUs += game; stats.postersUs += posters; stats.updates++;
+    if (ours > stats.oursMax) stats.oursMax = ours;
+    if (game > stats.gameMax) stats.gameMax = game;
+    if (now - stats.startedAt < 60000) return;
+    double k = 1.0 / std::max(1u, stats.updates);
+    logf("last %llu s: %u button updates; the arcade's hook %.0f us avg / %.0f us max (%u full passes), Echo's own update %.0f us avg / %.0f us max, posters %.0f us avg",
+         (now - stats.startedAt) / 1000, stats.updates, stats.oursUs * k, stats.oursMax, fullGates, stats.gameUs * k, stats.gameMax, stats.postersUs * k);
+    stats = HookStats{};
+    stats.startedAt = now;
+    fullGates = 0;
+}
+
 void button(void* cs) {
+    double t0 = microseconds();
     { std::lock_guard<std::recursive_mutex> lock(mutex); if (!fault) safeButtonTick(cs); }
+    double t1 = microseconds();
     buttonOriginal(cs);
+    double t2 = microseconds();
     { std::lock_guard<std::recursive_mutex> lock(mutex); if (!fault) safeButtonTick(cs); }
+    double t3 = microseconds();
     if (!fault) posters::afterButtonUpdate(cs);  // fingertips for the docked lobby poster
+    account(t1 - t0 + t3 - t2, t2 - t1, microseconds() - t3);
 }
 
 void onEvent(void* gs, U event, U actor, U component) {
