@@ -1,1 +1,1 @@
-Echo Arcade at commit 95515b6, with dist/ built from it.
+Echo Arcade at commit d1fc83a, with dist/ built from it.

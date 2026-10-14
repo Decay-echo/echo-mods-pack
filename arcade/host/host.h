@@ -55,11 +55,12 @@ struct Config {
     std::wstring youtubeAudio;        // the browser's sound while the tablet shows its YouTube: "headset" (default) or "default" (Windows' device)
     std::wstring minecraft, curseforge, modrinth, prism;  // Minecraft launchers ([paths]; empty = found by itself)
     bool moviesTile = false;          // MOVIES on the launcher instead of MINECRAFT
-    bool sharing = true;              // the SPLIT SCREEN / SHARE MY TABLET / WATCH A FRIEND tiles (echo_tweaks.ini [share] tiles)
+    bool sharing = false;             // the SPLIT SCREEN / SHARE MY TABLET / WATCH A FRIEND tiles (echo_tweaks.ini [share] tiles=1; off unless asked for)
     bool minecraftSleep = false;      // Minecraft's game suspended outright while hidden (echo_tweaks.ini [cpu] minecraft_sleep); off: idle priority
     bool minecraftMinimize = true;    // Minecraft's window minimized while hidden (echo_tweaks.ini [minecraft] minimize_hidden): 1.21.2+ then draws 10 fps
+    float minecraftLookScale = 1.f;   // SETTINGS > TABLET > Minecraft look speed (echo_tweaks.ini [minecraft] look_speed), times arcade.ini's base
     bool echoInEcho = false;          // the ECHO VR tile (a second Echo VR in desktop mode); off unless asked for
-    float minecraftLook = 3.f;        // FREEZE in Minecraft: mouse pixels per tick at full stick
+    float minecraftLook = 3.f;        // FREEZE in Minecraft: the look speed base (arcade.ini); full stick = twice this in mouse pixels a tick
     int balatroPort = 55410, retroCmdPort = 55355, retroPadPort = 55400;
     int sharePort = 6730;             // SHARE MY TABLET listens here (TCP)
 };

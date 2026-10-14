@@ -221,7 +221,16 @@ Rect Session::contentRect() const {
 
 Rect Session::windowRect() const {
     Rect r = contentRect();
-    return {0, 0, r.w() * windowScale_, r.h() * windowScale_};
+    int w = r.w() * windowScale_, h = r.h() * windowScale_;
+    // Never bigger than the primary screen (poster quality HIGH asks for 2048 x 1148, more than
+    // a 1080p monitor): scaled down to fit, same shape; the capture is scaled anyway.
+    int sw = GetSystemMetrics(SM_CXSCREEN), sh = GetSystemMetrics(SM_CYSCREEN);
+    if (sw > 0 && sh > 0 && (w > sw || h > sh)) {
+        double k = std::min(double(sw) / w, double(sh) / h);
+        w = int(w * k);
+        h = int(h * k);
+    }
+    return {0, 0, w, h};
 }
 
 void Session::own(DWORD pid) {
@@ -387,8 +396,14 @@ void Session::poll() {
                     hostLog("minecraft: game window %p (pid %lu, class %ls, \"%ls\")", static_cast<void*>(w.game), gamePid, w.gameClass, w.gameTitle);
                     if (gamePid) routeAudioLater(gamePid, findAudioDevice(config_.audioDevice), config_.appVolume, "minecraft");
                 }
+                if (w.game && w.launcher && w.launcher != w.game) {  // the launcher's window has done its job: out of the way
+                    HWND launcher = w.launcher;
+                    std::thread([launcher] { if (!IsIconic(launcher)) ShowWindow(launcher, SW_SHOWMINNOACTIVE); }).detach();
+                    hostLog("minecraft: launcher window minimized (the game's window is the tablet's now)");
+                }
                 HWND hwnd = window_;
                 std::thread([hwnd, x, w = r.w(), h = r.h()] {
+                    if (IsIconic(hwnd)) ShowWindow(hwnd, SW_SHOWNOACTIVATE);  // minimized while it was not the tablet's: back
                     LONG style = GetWindowLongW(hwnd, GWL_STYLE);
                     SetWindowLongW(hwnd, GWL_STYLE, (style & ~(WS_CAPTION | WS_THICKFRAME | WS_SYSMENU | WS_MAXIMIZEBOX | WS_MINIMIZEBOX)) | WS_POPUP);
                     SetWindowPos(hwnd, HWND_BOTTOM, x, 0, w, h, SWP_NOACTIVATE | SWP_FRAMECHANGED | SWP_SHOWWINDOW);
@@ -516,22 +531,26 @@ void Session::background(bool shown, bool playing) {
         suspendedPid_ = gamePid;
         hostLog("minecraft: suspended (not on the tablet; no CPU until it is)");
     }
-    // Hidden Minecraft's window minimized (after 2 s, so a flip of the wrist does nothing):
-    // Minecraft 1.21.2 and newer then draw 10 frames a second and the GPU is Echo's. Back the
-    // moment the tablet shows it. Never while it sleeps: a suspended process cannot answer
+    // Hidden Minecraft's window (the one the tablet shows: the launcher's, then the game's)
+    // minimized after 2 s, so a flip of the wrist does nothing: Minecraft 1.21.2 and newer then
+    // draw 10 frames a second and the GPU is Echo's, and nothing of it is on the desktop. Back
+    // the moment the tablet shows it. Never while it sleeps: a suspended process cannot answer
     // the window messages, which wait on it, so they go out on a thread of their own anyway.
-    HWND gameWindow = id_ == AppId::Minecraft ? minecraftGame_ : nullptr;
-    bool hide = config_.minecraftMinimize && !suspend && gameWindow && !shown && !playing;
+    HWND target = id_ == AppId::Minecraft ? window_ : nullptr;
+    bool hide = config_.minecraftMinimize && !suspend && target && !shown && !playing;
     uint64_t now = GetTickCount64();
     if (!hide) hiddenSince_ = 0;
     else if (!hiddenSince_) hiddenSince_ = now;
-    if (hide && !minimized_ && now - hiddenSince_ >= 2000) {
-        minimized_ = true;
-        if (!IsIconic(gameWindow)) std::thread([gameWindow] { ShowWindow(gameWindow, SW_SHOWMINNOACTIVE); }).detach();
-        hostLog("minecraft: window minimized (hidden; Minecraft 1.21.2+ draws 10 frames a second minimized)");
-    } else if (!hide && minimized_) {
-        minimized_ = false;
-        if (gameWindow && IsIconic(gameWindow)) std::thread([gameWindow] { ShowWindow(gameWindow, SW_SHOWNOACTIVATE); }).detach();
+    if (hide && now - hiddenSince_ >= 2000 && !IsIconic(target) && now - minimizedAt_ >= 1000) {
+        minimizedAt_ = now;  // once a second at most: a restore by someone else is undone, never fought
+        if (minimizedWindow_ != target)
+            hostLog("minecraft: %s window minimized (hidden; Minecraft 1.21.2+ draws 10 frames a second minimized)", target == minecraftGame_ ? "game" : "launcher");
+        minimizedWindow_ = target;
+        std::thread([target] { ShowWindow(target, SW_SHOWMINNOACTIVE); }).detach();
+    } else if (!hide && minimizedWindow_) {
+        HWND back = minimizedWindow_;
+        minimizedWindow_ = nullptr;
+        if (IsWindow(back) && IsIconic(back)) std::thread([back] { ShowWindow(back, SW_SHOWNOACTIVATE); }).detach();
         hostLog("minecraft: window back (%s)", playing ? "FREEZE" : "on the tablet");
     }
     // CPU and GPU by what the game is to the player right now: played (FREEZE) -> normal on
@@ -557,7 +576,8 @@ void Session::kill() {
     window_ = nullptr;
     if (gameSuspended_) suspendProcess(suspendedPid_, false);  // ended awake, so nothing stays stuck
     gameSuspended_ = false;
-    minimized_ = false;
+    minimizedWindow_ = nullptr;
+    minimizedAt_ = 0;
     hiddenSince_ = 0;
     lastPriority_ = -1;
     gpuLoweredPid_ = 0;

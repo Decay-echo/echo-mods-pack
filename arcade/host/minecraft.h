@@ -142,6 +142,10 @@ inline Windows find(DWORD launcherPid, const wchar_t* launcherTitle = L"Minecraf
         if (!IsWindowVisible(hwnd) || GetWindow(hwnd, GW_OWNER)) return TRUE;
         RECT r{};
         GetWindowRect(hwnd, &r);
+        if (IsIconic(hwnd)) {  // minimized (the host does that while the tablet does not show it): judged by its restored size
+            WINDOWPLACEMENT wp{sizeof wp};
+            if (GetWindowPlacement(hwnd, &wp)) r = wp.rcNormalPosition;
+        }
         long long area = (long long)(r.right - r.left) * (r.bottom - r.top);
         if (r.right - r.left < 100 || r.bottom - r.top < 100) return TRUE;
         wchar_t cls[64] = L"", title[128] = L"";
@@ -150,7 +154,7 @@ inline Windows find(DWORD launcherPid, const wchar_t* launcherTitle = L"Minecraf
         DWORD pid = 0;
         GetWindowThreadProcessId(hwnd, &pid);
         if (pid == GetCurrentProcessId()) return TRUE;
-        bool gameClass = !wcscmp(cls, L"GLFW30") || !wcscmp(cls, L"LWJGL");
+        bool gameClass = !wcscmp(cls, L"GLFW30") || !wcscmp(cls, L"LWJGL") || !wcscmp(cls, L"SDL_app");  // SDL: Minecraft 26.x
         int score = gameClass ? 3 : (r.right - r.left >= 400 && r.bottom - r.top >= 300 && isJava(pid)) ? 2 : 0;
         if (score && (score > c->gameScore || (score == c->gameScore && area > c->gameArea))) {
             c->w.game = hwnd;
@@ -290,8 +294,11 @@ public:
         float rx = s.stick[1][0], ry = s.stick[1][1];
         if (std::fabs(rx) < 0.12f) rx = 0;
         if (std::fabs(ry) < 0.12f) ry = 0;
-        lookX_ += rx * std::fabs(rx) * lookSpeed;  // squared: fine aim near the centre
-        lookY_ -= ry * std::fabs(ry) * lookSpeed;
+        // Cubed, at twice the pixels: the same fine aim as the old squared curve up to half
+        // stick (a quarter of the top speed there, 3% at a quarter stick), twice as fast at the
+        // edge. The same deltas move the pointer in the menus.
+        lookX_ += rx * rx * rx * 2 * lookSpeed;
+        lookY_ -= ry * ry * ry * 2 * lookSpeed;
         int dx = int(lookX_), dy = int(lookY_);
         if (dx || dy) {
             lookX_ -= dx;

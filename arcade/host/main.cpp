@@ -1188,7 +1188,7 @@ private:
                 lastRefocus_ = now;
                 minecraft::focus(session_.window());
             }
-            mcInput_.apply(s, padFrame_, config_.minecraftLook, session_.window());
+            mcInput_.apply(s, padFrame_, config_.minecraftLook * config_.minecraftLookScale, session_.window());
             padFed_ = true;
             if (padFrame_.release) stopFreeze(L"Freeze off: you can move again. Minecraft is paused.");
             return;
@@ -1240,6 +1240,16 @@ private:
     };
     struct Page { std::wstring name; std::vector<Option> options; std::wstring footer; };
     static constexpr int SETTING_ROWS = 6, SETTING_Y = 148, SETTING_H = 64;
+    // A page draws SETTING_ROWS rows; one with more is split into NAME, NAME 2, NAME 3 tabs.
+    void addPage(Page p) {
+        if (int(p.options.size()) <= SETTING_ROWS) { pages_.push_back(std::move(p)); return; }
+        for (size_t at = 0, k = 1; at < p.options.size(); at += SETTING_ROWS, k++) {
+            Page part{k == 1 ? p.name : p.name + L" " + std::to_wstring(k)};
+            part.footer = p.footer;
+            part.options.assign(p.options.begin() + long(at), p.options.begin() + long(std::min(at + size_t(SETTING_ROWS), p.options.size())));
+            pages_.push_back(std::move(part));
+        }
+    }
 
     std::wstring tweaksPath() const { return config_.dir + L"\\echo_tweaks.ini"; }
     static std::wstring parent(const std::wstring& path) { return path.substr(0, path.find_last_of(L"\\/")); }
@@ -1347,7 +1357,8 @@ private:
         sidesOn_ = GetPrivateProfileIntW(L"sides", L"enabled", 1, t.c_str()) != 0;
         config_.minecraftSleep = GetPrivateProfileIntW(L"cpu", L"minecraft_sleep", 0, t.c_str()) != 0;
         config_.minecraftMinimize = GetPrivateProfileIntW(L"minecraft", L"minimize_hidden", 1, t.c_str()) != 0;
-        bool sharing = GetPrivateProfileIntW(L"share", L"tiles", 1, t.c_str()) != 0;
+        config_.minecraftLookScale = std::clamp(iniFloat(t, L"minecraft", L"look_speed", 1.f), .25f, 4.f);
+        bool sharing = GetPrivateProfileIntW(L"share", L"tiles", 0, t.c_str()) != 0;  // off unless turned on: nobody's tablet is shared by default
         if (sharing != config_.sharing) {
             config_.sharing = sharing;
             if (!sharing) { share_.stop(); watch_.disconnect(); }
@@ -1385,7 +1396,7 @@ private:
                 vp.options.push_back(o);
             }
             vp.footer = L"The lit one is what Echo uses now. Same as Echo's Settings > Audio; it stays after a restart.";
-            pages_.push_back(vp);
+            addPage(vp);
         }
 
         Page tablet{L"TABLET"};
@@ -1407,16 +1418,14 @@ private:
                                  : L"Poster quality NORMAL: from the next dock.";
         };
         tablet.options.push_back(quality);
-        Option sharing{L"Sharing tiles", L"SPLIT SCREEN, SHARE MY TABLET and WATCH A FRIEND on the launcher (they need a port your router opens)", Kind::Toggle};
+        Option sharing{L"Sharing tiles", L"Off unless you turn it on: SPLIT SCREEN, SHARE MY TABLET and WATCH A FRIEND on the launcher (they need a port your router opens)", Kind::Toggle};
         sharing.get = [this] { return config_.sharing ? 1.f : 0.f; };
         sharing.set = [this, tweaks](float v) { iniWrite(tweaks, L"share", L"tiles", v != 0 ? L"1" : L"0"); loadSettings(); };
-        tablet.options.push_back(sharing);
         Option sides{L"Side posters", L"Docked on the lobby's news board: the four posters beside it show listening mode, Discord, and cross play and friends (or the tablet, with the sharing tiles off)", Kind::Toggle};
         sides.get = [this] { return sidesOn_ ? 1.f : 0.f; };
         sides.set = [this, tweaks](float v) { sidesOn_ = v != 0; iniWrite(tweaks, L"sides", L"enabled", sidesOn_ ? L"1" : L"0"); };
-        tablet.options.push_back(sides);
-        Option hidden{L"Hidden Minecraft", L"Not on the tablet: runs on at low priority; MINIMIZED also minimizes its window (10 fps on 1.21.2+); ASLEEP freezes it (servers drop you)", Kind::Choice};
-        hidden.choices = {L"LOW PRIORITY", L"MINIMIZED", L"ASLEEP"};
+        Option hidden{L"Hidden Minecraft", L"Not on the tablet: RUNS ON at low priority; MINIMIZED also minimizes its window (10 fps on 1.21.2+); ASLEEP freezes it (servers drop you)", Kind::Choice};
+        hidden.choices = {L"RUNS ON", L"MINIMIZED", L"ASLEEP"};
         hidden.get = [this] { return config_.minecraftSleep ? 2.f : config_.minecraftMinimize ? 1.f : 0.f; };
         hidden.set = [this, tweaks](float v) {
             iniWrite(tweaks, L"cpu", L"minecraft_sleep", v == 2 ? L"1" : L"0");
@@ -1433,6 +1442,12 @@ private:
             message_ = mcLight_ ? L"Minecraft light settings: applied the next time Minecraft starts." : L"Minecraft keeps its own video settings from its next start.";
         };
         tablet.options.push_back(light);
+        Option look = slider(L"Minecraft look speed", L"Right stick: turning in the game and the pointer in its menus (fine near the centre, fast at the edge)",
+                             tweaks, L"minecraft", L"look_speed", .25f, 4.f, .25f, 1.f, L"%.2fx");
+        look.set = [this, tweaks](float v) { iniWrite(tweaks, L"minecraft", L"look_speed", num(v, L"%.2f")); loadSettings(); };
+        tablet.options.push_back(look);
+        tablet.options.push_back(sharing);  // TABLET 2 from here (six rows a page)
+        tablet.options.push_back(sides);
         Option ads{L"Skip YouTube ads", L"In your browser's YouTube, the Skip button is pressed for you as soon as it appears", Kind::Toggle};
         ads.get = [this] { return skipAds_ ? 1.f : 0.f; };
         ads.set = [this, tweaks](float v) { skipAds_ = v != 0; iniWrite(tweaks, L"youtube", L"skip_ads", skipAds_ ? L"1" : L"0"); };
@@ -1455,7 +1470,7 @@ private:
         };
         tablet.options.push_back(ytAudio);
         tablet.footer = L"View (FOV) is set in echo_tweaks.ini.";
-        pages_.push_back(tablet);
+        addPage(tablet);
 
         if (hasHud) {
             Page p{L"HUD"};
@@ -1486,7 +1501,7 @@ private:
                 iniWrite(hud, L"speed", L"top_speed", s);
             };
             p.options.push_back(gauges);
-            pages_.push_back(p);
+            addPage(p);
 
             Page pp{L"PASSES"};
             pp.options.push_back(passes);
@@ -1501,7 +1516,7 @@ private:
                                         hud, L"passes", L"count_from", 1, 20, 1, 6, L"%.0f"));
             pp.options.push_back(slider(L"Size", L"The counter's size", hud, L"passes", L"size_px", 10, 60, 2, 26, L"%.0f px"));
             pp.footer = L"A slower catch, or more bounces, is no pass: the chain starts over there.";
-            pages_.push_back(pp);
+            addPage(pp);
         }
 
         Page screen{L"SCREEN"};
@@ -1524,7 +1539,7 @@ private:
             lines.set = [this](float v) { setHudLines(v != 0); };
             screen.options.push_back(lines);
         }
-        if (!screen.options.empty()) pages_.push_back(screen);
+        if (!screen.options.empty()) addPage(screen);
 
         if (exists(disc)) {
             static const wchar_t* const names[5] = {L"A", L"B", L"X", L"Y", L"OFF"};
@@ -1540,7 +1555,7 @@ private:
             p.options.push_back(button);
             p.options.push_back(toggle(L"Hide it from Echo", L"Echo doesn't see that button at all", disc, L"summon", L"hide_from_echo", false));
             p.footer = L"The personal disc itself goes back with RESTORE.cmd in its own folder.";
-            pages_.push_back(p);
+            addPage(p);
         }
 
         Page normal{L"NORMAL"};
@@ -1555,7 +1570,7 @@ private:
         plain.text = [](float v) { return std::wstring(v == 2 ? L"CANCEL" : v == 1 ? L"TAP AGAIN: SURE?" : L"NORMAL TABLET"); };
         normal.options.push_back(plain);
         normal.footer = L"After NORMAL TABLET, INSTALL.cmd puts everything back.";
-        pages_.push_back(normal);
+        addPage(normal);
 
         page_ = std::clamp(page_, 0, int(pages_.size()) - 1);
         refreshOptions();

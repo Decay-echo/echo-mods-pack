@@ -98,7 +98,8 @@ private:
     bool gameSuspended_ = false;     // Minecraft's game process is suspended right now
     DWORD suspendedPid_ = 0;
     uint64_t hiddenSince_ = 0;       // Minecraft: when the tablet stopped showing it (0 = shown or played)
-    bool minimized_ = false;         // Minecraft's window minimized by us while hidden
+    HWND minimizedWindow_ = nullptr;  // the Minecraft window we minimized while hidden (the launcher's, or the game's)
+    uint64_t minimizedAt_ = 0;
     int lastPriority_ = -1;          // 1 normal (played), 0 below normal
     void own(DWORD pid);
     bool padState_[PadCount] = {};
